@@ -6,6 +6,36 @@ import { setSessionCookie } from "@/lib/auth/session";
 import { enforceRateLimit, enforceSameOriginMutation } from "@/lib/security/request-security";
 import { loginSchema } from "@/lib/validators/auth";
 
+function classifyLoginFailure(error: unknown) {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  const message = error.message.toLowerCase();
+
+  if (message.includes("jwt_secret")) {
+    return fail(
+      "Sign-in service is temporarily unavailable. Please try again shortly.",
+      503,
+      "AUTH_CONFIG_ERROR",
+    );
+  }
+
+  if (
+    message.includes("database_url") ||
+    message.includes("can't reach database server") ||
+    message.includes("prisma")
+  ) {
+    return fail(
+      "Sign-in service is temporarily unavailable. Please try again shortly.",
+      503,
+      "AUTH_DB_UNAVAILABLE",
+    );
+  }
+
+  return null;
+}
+
 export async function POST(request: Request) {
   const originError = enforceSameOriginMutation(request);
   if (originError) return originError;
@@ -31,6 +61,15 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof AppError) {
       return fail(error.message, error.status, error.code);
+    }
+
+    if (process.env.NODE_ENV !== "test") {
+      console.error("[auth.login] unexpected failure", error);
+    }
+
+    const classifiedFailure = classifyLoginFailure(error);
+    if (classifiedFailure) {
+      return classifiedFailure;
     }
 
     return fail("Unable to sign in", 500, "LOGIN_FAILED");

@@ -144,4 +144,46 @@ describe("POST /api/auth/login", () => {
     expect(payload.error).toBe("Unable to sign in");
     expect(payload.code).toBe("LOGIN_FAILED");
   });
+
+  it("returns service-unavailable error when JWT secret is misconfigured", async () => {
+    mockedLoginUser.mockRejectedValue(new Error("JWT_SECRET is missing or too short"));
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as {
+      success: boolean;
+      error?: string;
+      code?: string;
+    };
+
+    expect(response.status).toBe(503);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("AUTH_CONFIG_ERROR");
+  });
+
+  it("returns service-unavailable error when database connectivity fails", async () => {
+    mockedLoginUser.mockRejectedValue(
+      new Error("Prisma: Can't reach database server at db.example.supabase.co:5432"),
+    );
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as {
+      success: boolean;
+      error?: string;
+      code?: string;
+    };
+
+    expect(response.status).toBe(503);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("AUTH_DB_UNAVAILABLE");
+  });
 });
