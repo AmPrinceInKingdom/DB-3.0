@@ -165,6 +165,48 @@ describe("POST /api/auth/login", () => {
     expect(payload.code).toBe("AUTH_CONFIG_ERROR");
   });
 
+  it("returns schema-missing error when users table is unavailable", async () => {
+    mockedLoginUser.mockRejectedValue(new Error("The table `public.users` does not exist in the current database."));
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as {
+      success: boolean;
+      error?: string;
+      code?: string;
+    };
+
+    expect(response.status).toBe(503);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("AUTH_SCHEMA_MISSING");
+  });
+
+  it("returns credentials-invalid error when database credentials are wrong", async () => {
+    mockedLoginUser.mockRejectedValue(
+      new Error("P1000: Authentication failed against database server"),
+    );
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as {
+      success: boolean;
+      error?: string;
+      code?: string;
+    };
+
+    expect(response.status).toBe(503);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("AUTH_DB_CREDENTIALS_INVALID");
+  });
+
   it("returns service-unavailable error when database connectivity fails", async () => {
     mockedLoginUser.mockRejectedValue(
       new Error("Prisma: Can't reach database server at db.example.supabase.co:5432"),

@@ -5,21 +5,28 @@ declare global {
 }
 
 function buildRuntimeDatabaseUrl() {
-  const baseUrl = process.env.DATABASE_URL;
+  const baseUrl = process.env.DATABASE_URL ?? process.env.DIRECT_URL;
   if (!baseUrl) return undefined;
-
-  // In local development, a very low connection limit (for example 1)
-  // causes frequent pool timeouts when multiple widgets poll concurrently.
-  if (process.env.NODE_ENV !== "development") {
-    return baseUrl;
-  }
 
   try {
     const parsed = new URL(baseUrl);
-    const currentLimit = Number(parsed.searchParams.get("connection_limit") ?? "0");
+    const host = parsed.hostname.toLowerCase();
+    const isSupabaseHost = host.includes("supabase");
+    const isPoolerHost = host.includes("pooler.supabase.com");
+    const isDevelopment = process.env.NODE_ENV === "development";
 
-    if (!Number.isFinite(currentLimit) || currentLimit < 5) {
-      parsed.searchParams.set("connection_limit", "8");
+    if (isSupabaseHost && !parsed.searchParams.has("sslmode")) {
+      parsed.searchParams.set("sslmode", "require");
+    }
+
+    if (isPoolerHost && !parsed.searchParams.has("pgbouncer")) {
+      parsed.searchParams.set("pgbouncer", "true");
+    }
+
+    const currentLimit = Number(parsed.searchParams.get("connection_limit") ?? "0");
+    const desiredLimit = isDevelopment ? 8 : isPoolerHost ? 1 : 5;
+    if (!Number.isFinite(currentLimit) || currentLimit < desiredLimit) {
+      parsed.searchParams.set("connection_limit", String(desiredLimit));
     }
 
     if (!parsed.searchParams.has("pool_timeout")) {

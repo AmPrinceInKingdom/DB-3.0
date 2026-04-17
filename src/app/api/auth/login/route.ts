@@ -13,11 +13,38 @@ function classifyLoginFailure(error: unknown) {
 
   const message = error.message.toLowerCase();
 
-  if (message.includes("jwt_secret")) {
+  if (
+    message.includes("jwt_secret") ||
+    message.includes("environment variable not found: database_url") ||
+    message.includes("environment variable not found: direct_url")
+  ) {
     return fail(
       "Sign-in service is temporarily unavailable. Please try again shortly.",
       503,
       "AUTH_CONFIG_ERROR",
+    );
+  }
+
+  if (
+    message.includes("the table") ||
+    message.includes("does not exist") ||
+    message.includes("p2021")
+  ) {
+    return fail(
+      "Database schema is not ready yet. Please try again after setup.",
+      503,
+      "AUTH_SCHEMA_MISSING",
+    );
+  }
+
+  if (
+    message.includes("tenant or user not found") ||
+    message.includes("authentication failed against database server")
+  ) {
+    return fail(
+      "Database credentials are invalid for this deployment.",
+      503,
+      "AUTH_DB_CREDENTIALS_INVALID",
     );
   }
 
