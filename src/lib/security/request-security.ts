@@ -63,6 +63,22 @@ function parseOrigin(value: string | null): string | null {
   }
 }
 
+function resolveRequestOrigin(request: Request): string | null {
+  try {
+    return new URL(request.url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveForwardedOrigin(request: Request): string | null {
+  const forwardedHost = request.headers.get("x-forwarded-host")?.trim();
+  if (!forwardedHost) return null;
+
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.trim() || "https";
+  return parseOrigin(`${forwardedProto}://${forwardedHost}`);
+}
+
 function cleanExpiredEntries(now: number) {
   if (rateLimitStore.size < maxRateLimitEntries) return;
 
@@ -106,7 +122,11 @@ export function enforceSameOriginMutation(request: Request) {
 
   const origin = parseOrigin(request.headers.get("origin"));
   const refererOrigin = parseOrigin(request.headers.get("referer"));
-  if (origin === appOrigin || refererOrigin === appOrigin) {
+  const requestOrigin = resolveRequestOrigin(request);
+  const forwardedOrigin = resolveForwardedOrigin(request);
+  const allowedOrigins = new Set([appOrigin, requestOrigin, forwardedOrigin].filter(Boolean));
+
+  if ((origin && allowedOrigins.has(origin)) || (refererOrigin && allowedOrigins.has(refererOrigin))) {
     return null;
   }
 
