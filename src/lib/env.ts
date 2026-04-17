@@ -64,3 +64,20 @@ export const env = {
   ...data,
   NEXT_PUBLIC_APP_URL: resolveAppUrl(data.NODE_ENV),
 };
+
+const criticalEnvKeys = [
+  "DATABASE_URL",
+  "JWT_SECRET",
+  "NEXT_PUBLIC_SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+] as const;
+
+if (env.NODE_ENV === "production") {
+  const missingCritical = criticalEnvKeys.filter((key) => !env[key]);
+  if (missingCritical.length > 0) {
+    console.warn(
+      `[env] Missing critical variables: ${missingCritical.join(", ")}. Some features may not work until these are set.`,
+    );
+  }
+}

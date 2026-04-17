@@ -152,6 +152,7 @@ npm run seed:super-admin -- --email superadmin@dealbazaar.lk --password DealBaza
 - `npm run prisma:migrate` - Prisma migration (dev)
 - `npm run db:push` - push Prisma schema
 - `npm run db:studio` - open Prisma Studio
+- `npm run verify:deploy` - pre-deploy env + DB readiness check
 - `npm run seed:super-admin` - create/update super admin
 
 ## Testing
@@ -162,6 +163,18 @@ Run all tests:
 
 ```bash
 npm run test
+```
+
+Quick runtime health check (after local run or deploy):
+
+```bash
+curl http://localhost:3000/api/health
+```
+
+Vercel production:
+
+```bash
+curl https://<your-domain>/api/health
 ```
 
 Run in watch mode:
@@ -203,6 +216,58 @@ E2E_ADMIN_PASSWORD=<YOUR_SUPER_ADMIN_PASSWORD>
 - `password authentication failed`: wrong DB password in `DATABASE_URL` or `DIRECT_URL`.
 - `Another next dev server is already running`: stop old process.
 - PowerShell npm policy issue: run commands as `cmd /c npm run <script>`.
+- `Environment variable validation failed` on Vercel: set missing env vars in Vercel Project Settings and redeploy.
+
+## Vercel Deployment Env Checklist
+
+Add these variables in `Vercel -> Project -> Settings -> Environment Variables`:
+
+Required for app runtime:
+
+- `NEXT_PUBLIC_APP_URL` (your deployed URL, example `https://dealbazaar.lk`)
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `DATABASE_URL` (Supabase pooler, port `6543`)
+- `JWT_SECRET` (minimum 32 chars)
+
+Recommended:
+
+- `DIRECT_URL` (for Prisma migrate/seed scripts)
+- `SUPABASE_STORAGE_BUCKET_PRODUCTS`
+- `SUPABASE_STORAGE_BUCKET_PAYMENTS`
+- `SUPABASE_STORAGE_BUCKET_BRANDING`
+- `SESSION_EXPIRES_IN_DAYS`
+- `CARD_PAYMENT_SESSION_TTL_MINUTES`
+- SMTP vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_EMAIL`, `SMTP_FROM_NAME`) for OTP and email verification.
+
+After updating variables:
+
+1. Trigger a fresh redeploy from Vercel dashboard.
+2. Check deploy logs for `[env] Missing critical variables` warnings.
+3. If `NEXT_PUBLIC_APP_URL` changes, redeploy again so client-side build picks updated public env.
+
+## Pre-Deploy Validation
+
+Run this before Vercel deploy (or before pushing production config):
+
+```bash
+npm run verify:deploy
+```
+
+Optional (skip DB ping):
+
+```bash
+npm run verify:deploy -- --skip-db
+```
+
+This check validates:
+
+- Critical environment variables
+- `JWT_SECRET` minimum length
+- `NEXT_PUBLIC_APP_URL` format
+- SMTP completeness
+- Live database connectivity
 
 ## Notes
 
