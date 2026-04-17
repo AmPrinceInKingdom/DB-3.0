@@ -1,0 +1,93 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #f9f9fb;
+  --foreground: #131313;
+  --muted: #f1f1f4;
+  --muted-foreground: #616161;
+  --border: #e5e5ea;
+  --card: #ffffff;
+  --card-foreground: #151515;
+  --primary: #bd1026;
+  --primary-foreground: #fff8f8;
+  --secondary: #191919;
+  --secondary-foreground: #f7f7f7;
+  --accent: #8f0d1d;
+  --accent-foreground: #fff1f2;
+  --ring: #d94757;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-manrope);
+  --font-display: var(--font-sora);
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(189, 16, 38, 0.08), transparent 32%),
+    radial-gradient(circle at 85% 15%, rgba(25, 25, 25, 0.06), transparent 30%),
+    var(--background);
+  color: var(--foreground);
+  font-family: var(--font-manrope), sans-serif;
+}
+
+.dark {
+  --background: #0d0d0f;
+  --foreground: #f4f4f5;
+  --muted: #19191d;
+  --muted-foreground: #a8a8ad;
+  --border: #2b2b30;
+  --card: #121216;
+  --card-foreground: #f3f3f5;
+  --primary: #d4293f;
+  --primary-foreground: #fff6f7;
+  --secondary: #f3f3f4;
+  --secondary-foreground: #121214;
+  --accent: #eb4156;
+  --accent-foreground: #2d0a0f;
+  --ring: #f16b7d;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-sora), sans-serif;
+    letter-spacing: -0.02em;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 35%, transparent);
+    color: var(--foreground);
+  }
+}
+
+@layer utilities {
+  .container-app {
+    @apply mx-auto w-full max-w-[1280px] px-4 md:px-6 lg:px-8;
+  }
+
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+}
