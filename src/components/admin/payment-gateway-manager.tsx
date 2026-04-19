@@ -150,16 +150,16 @@ export function PaymentGatewayManager() {
 
   const selectedProviderReady = useMemo(() => {
     if (!health || !settings) return true;
-    return settings.cardPaymentProvider === "SANDBOX"
-      ? health.sandboxReady
-      : health.stripeReady;
+    return health.selectedProviderReady;
   }, [health, settings]);
 
   const stripeHasBlockingIssue =
-    settings?.cardPaymentProvider === "STRIPE_CHECKOUT" && !(health?.stripeReady ?? true);
+    settings?.cardPaymentProvider === "STRIPE_CHECKOUT" &&
+    !(health?.selectedProviderReady ?? true);
   const bankTransferHasBlockingIssue = Boolean(
     settings?.bankTransferEnabled && !(health?.bankTransferDetailsReady ?? true),
   );
+  const hasBlockingIssue = stripeHasBlockingIssue || bankTransferHasBlockingIssue;
 
   if (loading && !settings) {
     return (
@@ -193,7 +193,7 @@ export function PaymentGatewayManager() {
             <RefreshCcw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
-          <Button onClick={() => void saveSettings()} disabled={saving || loading}>
+          <Button onClick={() => void saveSettings()} disabled={saving || loading || hasBlockingIssue}>
             <Save className="mr-2 h-4 w-4" />
             {saving ? "Saving..." : "Save Gateway"}
           </Button>
@@ -203,6 +203,11 @@ export function PaymentGatewayManager() {
       {error ? (
         <p className="rounded-xl border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-300">
           {error}
+        </p>
+      ) : null}
+      {hasBlockingIssue ? (
+        <p className="rounded-xl border border-amber-400/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          Resolve payment gateway blocking issues before saving.
         </p>
       ) : null}
 
@@ -226,16 +231,93 @@ export function PaymentGatewayManager() {
               ? "Stripe setup is incomplete."
               : "Sandbox provider unavailable."}
         </p>
-        <div className="mt-2 grid gap-1 text-xs text-muted-foreground md:grid-cols-3">
+        <div className="mt-2 grid gap-1 text-xs text-muted-foreground md:grid-cols-4">
           <span>STRIPE_SECRET_KEY: {health.stripeSecretKeyConfigured ? "OK" : "Missing"}</span>
           <span>STRIPE_WEBHOOK_SECRET: {health.stripeWebhookSecretConfigured ? "OK" : "Missing"}</span>
           <span>NEXT_PUBLIC_APP_URL: {health.appUrlConfigured ? "OK" : "Missing"}</span>
+          <span>Stripe API: {health.stripeConnection.reachable ? "Reachable" : "Unreachable"}</span>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full border border-border bg-background px-2 py-1 text-card-foreground">
+            Stripe key mode: {health.stripeSecretKeyMode}
+          </span>
+          <span
+            className={
+              health.stripeProductionReady
+                ? "rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-emerald-700 dark:text-emerald-300"
+                : "rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-300"
+            }
+          >
+            Go-live: {health.stripeProductionReady ? "Ready" : "Needs review"}
+          </span>
+          <span className="rounded-full border border-border bg-background px-2 py-1 text-card-foreground">
+            Strict production guard: {health.strictProduction ? "ON" : "OFF"}
+          </span>
         </div>
         {health.missingStripeRequirements.length > 0 ? (
           <p className="mt-2 text-xs text-red-600 dark:text-red-300">
             Missing Stripe config: {health.missingStripeRequirements.join(", ")}
           </p>
         ) : null}
+        {health.stripeProductionWarnings.length > 0 ? (
+          <div className="mt-2 rounded-xl border border-amber-400/40 bg-amber-500/10 p-3">
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+              Stripe go-live checks
+            </p>
+            <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-700/95 dark:text-amber-300/95">
+              {health.stripeProductionWarnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <div className="mt-2 rounded-xl border border-border/70 bg-background/80 p-3 text-xs text-muted-foreground">
+          <p className="font-semibold text-card-foreground">Stripe account diagnostics</p>
+          <div className="mt-1 grid gap-1 md:grid-cols-3">
+            <span>Account: {health.stripeConnection.accountId ?? "-"}</span>
+            <span>Country: {health.stripeConnection.country ?? "-"}</span>
+            <span>
+              Live mode:{" "}
+              {health.stripeConnection.livemode === null
+                ? "-"
+                : health.stripeConnection.livemode
+                  ? "Yes"
+                  : "No"}
+            </span>
+            <span>
+              Charges enabled:{" "}
+              {health.stripeConnection.chargesEnabled === null
+                ? "-"
+                : health.stripeConnection.chargesEnabled
+                  ? "Yes"
+                  : "No"}
+            </span>
+            <span>
+              Payouts enabled:{" "}
+              {health.stripeConnection.payoutsEnabled === null
+                ? "-"
+                : health.stripeConnection.payoutsEnabled
+                  ? "Yes"
+                  : "No"}
+            </span>
+            <span>
+              Details submitted:{" "}
+              {health.stripeConnection.detailsSubmitted === null
+                ? "-"
+                : health.stripeConnection.detailsSubmitted
+                  ? "Yes"
+                  : "No"}
+            </span>
+          </div>
+          {health.stripeConnection.checkedAt ? (
+            <p className="mt-1">Last checked: {new Date(health.stripeConnection.checkedAt).toLocaleString()}</p>
+          ) : null}
+          {health.stripeConnection.errorMessage ? (
+            <p className="mt-1 text-red-600 dark:text-red-300">
+              {health.stripeConnection.errorMessage}
+            </p>
+          ) : null}
+        </div>
       </section>
 
       {bankTransferHasBlockingIssue ? (

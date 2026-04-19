@@ -10,6 +10,7 @@ const footerGroups = [
     title: "Customer Care",
     links: [
       { label: "Help Center", href: "/help-center" },
+      { label: "System Status", href: "/health" },
       { label: "Contact Us", href: "/contact" },
       { label: "Returns", href: "/return-policy" },
       { label: "Shipping", href: "/shipping-policy" },

@@ -558,11 +558,35 @@ export async function reviewAdminSellerApplication(params: ReviewSellerApplicati
   const reason = normalizeOptionalText(params.reason);
 
   const result = await db.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({
+        where: { id: params.actorUserId },
+        select: {
+          id: true,
+          role: true,
+          status: true,
+          deletedAt: true,
+        },
+      });
+
+      if (
+        !actor ||
+        actor.deletedAt ||
+        actor.status !== AccountStatus.ACTIVE ||
+        (actor.role !== UserRole.ADMIN && actor.role !== UserRole.SUPER_ADMIN)
+      ) {
+        throw new AppError(
+          "Admin session is invalid. Please sign in again.",
+          401,
+          "ADMIN_SESSION_INVALID",
+        );
+      }
+
       const current = await tx.seller.findUnique({
         where: { userId: params.sellerUserId },
         select: {
           userId: true,
           storeName: true,
+          status: true,
           user: {
             select: {
               id: true,
@@ -574,6 +598,22 @@ export async function reviewAdminSellerApplication(params: ReviewSellerApplicati
 
       if (!current) {
         throw new NotFoundError("Seller application not found");
+      }
+
+      if (params.action === "REJECT" && current.status !== AccountStatus.PENDING) {
+        throw new AppError(
+          "Only pending seller applications can be rejected.",
+          400,
+          "SELLER_REVIEW_INVALID_STATE",
+        );
+      }
+
+      if (params.action === "SUSPEND" && current.status !== AccountStatus.ACTIVE) {
+        throw new AppError(
+          "Only active sellers can be suspended.",
+          400,
+          "SELLER_REVIEW_INVALID_STATE",
+        );
       }
 
       const nextSellerStatus =
@@ -591,7 +631,7 @@ export async function reviewAdminSellerApplication(params: ReviewSellerApplicati
         data: {
           status: nextSellerStatus,
           ...(params.action === "APPROVE"
-            ? { approvedBy: params.actorUserId, approvedAt: new Date() }
+            ? { approvedBy: actor.id, approvedAt: new Date() }
             : {}),
           ...(params.action === "REJECT"
             ? { approvedBy: null, approvedAt: null }

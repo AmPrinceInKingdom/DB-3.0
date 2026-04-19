@@ -1042,6 +1042,7 @@ export async function reviewPaymentProof(input: ReviewPaymentProofInput) {
           ? { status: OrderStatus.CONFIRMED }
           : {}),
       },
+      select: { id: true },
     });
 
     await tx.payment.updateMany({

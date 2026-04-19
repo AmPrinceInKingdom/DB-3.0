@@ -145,8 +145,6 @@ export function ProductDetailsView({ product, related, details, currency = "LKR"
   const [activeImage, setActiveImage] = useState(0);
   const [activeTab, setActiveTab] = useState<TabKey>("reviews");
   const [quantity, setQuantity] = useState(1);
-  const [selectedStorage, setSelectedStorage] = useState("16TB");
-  const [selectedColor, setSelectedColor] = useState("Silver");
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
 
   useEffect(() => {
@@ -229,11 +227,8 @@ export function ProductDetailsView({ product, related, details, currency = "LKR"
     hasRealVariants && selectedVariant
       ? selectedVariant.stockQuantity > 0
       : product.inStock;
-  const resolvedVariantId =
-    selectedVariant?.id ?? (hasRealVariants ? null : `${selectedStorage}-${selectedColor}`);
-  const resolvedVariantLabel = selectedVariant
-    ? buildVariantLabel(selectedVariant)
-    : `Storage: ${selectedStorage} | Color: ${selectedColor}`;
+  const resolvedVariantId = selectedVariant?.id ?? null;
+  const resolvedVariantLabel = selectedVariant ? buildVariantLabel(selectedVariant) : null;
   const resolvedImageUrl = selectedVariant?.imageUrl ?? product.imageUrl;
   const maxQuantityByStock = selectedVariant
     ? Math.max(1, Math.min(20, selectedVariant.stockQuantity || 1))
@@ -256,15 +251,10 @@ export function ProductDetailsView({ product, related, details, currency = "LKR"
   const defaultSpecs = [
     { label: "Brand", value: product.brand },
     { label: "Category", value: product.category },
-    ...(selectedVariant
-      ? Object.entries(selectedVariant.options).map(([label, value]) => ({
-          label,
-          value,
-        }))
-      : [
-          { label: "Storage", value: selectedStorage },
-          { label: "Color", value: selectedColor },
-        ]),
+    ...Object.entries(selectedVariant?.options ?? {}).map(([label, value]) => ({
+      label,
+      value,
+    })),
     { label: "Stock", value: resolvedInStock ? "In stock" : "Out of stock" },
     ...(selectedVariant ? [{ label: "Variant SKU", value: selectedVariant.sku }] : []),
     { label: "Delivery", value: "2-5 business days" },
@@ -716,77 +706,33 @@ export function ProductDetailsView({ product, related, details, currency = "LKR"
                     ) : null}
                   </div>
 
-                  {hasRealVariants && variantOptionGroups.length > 0 ? (
-                    variantOptionGroups.map((group) => (
-                      <div key={group.key} className="space-y-2">
-                        <p className="text-sm font-semibold">{group.label}</p>
-                        <div className="flex flex-wrap gap-2">
-                          {group.values.map((value) => {
-                            const isActive = selectedVariantOptionMap.get(group.key) === value;
-                            return (
-                              <button
-                                key={`${group.key}-${value}`}
-                                type="button"
-                                onClick={() => handleVariantOptionSelect(group.key, value)}
-                                className={cn(
-                                  "rounded-lg border px-3 py-1.5 text-sm transition",
-                                  isActive
-                                    ? "border-primary bg-primary/10 text-primary"
-                                    : "border-border bg-background hover:border-primary/50",
-                                )}
-                              >
-                                {value}
-                              </button>
-                            );
-                          })}
+                  {hasRealVariants && variantOptionGroups.length > 0
+                    ? variantOptionGroups.map((group) => (
+                        <div key={group.key} className="space-y-2">
+                          <p className="text-sm font-semibold">{group.label}</p>
+                          <div className="flex flex-wrap gap-2">
+                            {group.values.map((value) => {
+                              const isActive = selectedVariantOptionMap.get(group.key) === value;
+                              return (
+                                <button
+                                  key={`${group.key}-${value}`}
+                                  type="button"
+                                  onClick={() => handleVariantOptionSelect(group.key, value)}
+                                  className={cn(
+                                    "rounded-lg border px-3 py-1.5 text-sm transition",
+                                    isActive
+                                      ? "border-primary bg-primary/10 text-primary"
+                                      : "border-border bg-background hover:border-primary/50",
+                                  )}
+                                >
+                                  {value}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
-                      </div>
-                    ))
-                  ) : (
-                    <>
-                      <div className="space-y-2">
-                        <p className="text-sm font-semibold">Storage</p>
-                        <div className="flex flex-wrap gap-2">
-                          {["8TB", "16TB", "32TB", "64TB"].map((storage) => (
-                            <button
-                              key={storage}
-                              type="button"
-                              onClick={() => setSelectedStorage(storage)}
-                              className={cn(
-                                "rounded-lg border px-3 py-1.5 text-sm transition",
-                                storage === selectedStorage
-                                  ? "border-primary bg-primary/10 text-primary"
-                                  : "border-border bg-background hover:border-primary/50",
-                              )}
-                            >
-                              {storage}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <p className="text-sm font-semibold">Color</p>
-                        <div className="flex flex-wrap gap-2">
-                          {["Silver", "Space Gray", "Red"].map((color) => (
-                            <button
-                              key={color}
-                              type="button"
-                              onClick={() => setSelectedColor(color)}
-                              className={cn(
-                                "rounded-lg border px-3 py-1.5 text-sm transition",
-                                color === selectedColor
-                                  ? "border-primary bg-primary/10 text-primary"
-                                  : "border-border bg-background hover:border-primary/50",
-                              )}
-                            >
-                              {color}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
+                      ))
+                    : null}
 
                   <div className="grid gap-2 rounded-xl border border-border bg-background p-3 text-sm">
                     <p className="inline-flex items-center gap-2">

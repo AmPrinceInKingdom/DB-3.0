@@ -1,6 +1,5 @@
 import { ok, fail } from "@/lib/api-response";
 import { db } from "@/lib/db";
-import { allHomeProducts } from "@/lib/constants/mock-data";
 
 type SuggestionItem = {
   id: string;
@@ -20,29 +19,6 @@ function normalizeLimit(raw: string | null) {
   const parsed = Number(raw ?? 6);
   if (!Number.isFinite(parsed)) return 6;
   return Math.min(Math.max(Math.floor(parsed), 1), 10);
-}
-
-function fromMockData(query: string, limit: number): SuggestionItem[] {
-  const lowered = query.toLowerCase();
-
-  return allHomeProducts
-    .filter((item) =>
-      [item.name, item.shortDescription, item.brand, item.category]
-        .join(" ")
-        .toLowerCase()
-        .includes(lowered),
-    )
-    .sort((a, b) => b.rating * b.reviewsCount - a.rating * a.reviewsCount)
-    .slice(0, limit)
-    .map((item) => ({
-      id: item.id,
-      name: item.name,
-      slug: item.slug,
-      brand: item.brand,
-      category: item.category,
-      imageUrl: item.imageUrl,
-      price: item.price,
-    }));
 }
 
 export async function GET(request: Request) {
@@ -94,18 +70,15 @@ export async function GET(request: Request) {
       take: limit,
     });
 
-    const items: SuggestionItem[] =
-      dbSuggestions.length > 0
-        ? dbSuggestions.map((item) => ({
-            id: item.id,
-            name: item.name,
-            slug: item.slug,
-            brand: item.brand?.name ?? "Deal Bazaar",
-            category: item.category.name,
-            imageUrl: item.images[0]?.imageUrl ?? "",
-            price: Number(item.currentPrice),
-          }))
-        : fromMockData(query, limit);
+    const items: SuggestionItem[] = dbSuggestions.map((item) => ({
+      id: item.id,
+      name: item.name,
+      slug: item.slug,
+      brand: item.brand?.name ?? "Deal Bazaar",
+      category: item.category.name,
+      imageUrl: item.images[0]?.imageUrl ?? "",
+      price: Number(item.currentPrice),
+    }));
 
     return ok({
       query,

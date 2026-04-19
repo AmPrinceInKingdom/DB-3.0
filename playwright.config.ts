@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
+const useProductionServer = process.env.E2E_USE_START === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -19,10 +20,10 @@ export default defineConfig({
     video: "retain-on-failure",
   },
   webServer: {
-    command: "npm run dev -- --port 3000",
+    command: useProductionServer ? "npm run start -- --port 3000" : "npm run dev -- --port 3000",
     url: baseURL,
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: useProductionServer ? 180_000 : 120_000,
   },
   projects: [
     {

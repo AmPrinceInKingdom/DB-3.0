@@ -10,6 +10,8 @@ type Props = {
 };
 
 export function ProductStripSection({ title, subtitle, href, products }: Props) {
+  if (products.length === 0) return null;
+
   return (
     <section>
       <SectionHeader title={title} subtitle={subtitle} href={href} />
@@ -26,4 +28,3 @@ export function ProductStripSection({ title, subtitle, href, products }: Props) 
     </section>
   );
 }
-

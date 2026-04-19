@@ -11,14 +11,24 @@ function resolveSupabaseHostname() {
 }
 
 const supabaseHostname = resolveSupabaseHostname();
+const allowLocalImageIp =
+  (process.env.NODE_ENV ?? "development") !== "production" ||
+  process.env.PLAYWRIGHT_TEST === "1" ||
+  process.env.E2E_USE_START === "1";
 
 const nextConfig: NextConfig = {
   reactCompiler: true,
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   images: {
+    dangerouslyAllowLocalIP: allowLocalImageIp,
     remotePatterns: [
       {
         protocol: "https",
         hostname: "images.unsplash.com",
+      },
+      {
+        protocol: "https",
+        hostname: "encrypted-tbn0.gstatic.com",
       },
       ...(supabaseHostname
         ? [

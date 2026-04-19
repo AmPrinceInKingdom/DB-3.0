@@ -25,6 +25,11 @@ const smtpKeys = [
   "SMTP_FROM_NAME",
 ];
 
+const stripeKeys = [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+];
+
 function parseEnvFile(content) {
   const parsed = {};
   const lines = content.split(/\r?\n/);
@@ -80,25 +85,98 @@ function validateUrl(label, value) {
   }
 }
 
+function detectCardProvider() {
+  const raw = String(process.env.CARD_PAYMENT_PROVIDER ?? "").trim().toUpperCase();
+  return raw === "STRIPE_CHECKOUT" ? "STRIPE_CHECKOUT" : "SANDBOX";
+}
+
+function isStrictProduction() {
+  const vercelEnv = String(process.env.VERCEL_ENV ?? "").trim().toLowerCase();
+  if (vercelEnv) {
+    return vercelEnv === "production";
+  }
+  return String(process.env.NODE_ENV ?? "").trim().toLowerCase() === "production";
+}
+
+function isHttpsUrl(value) {
+  if (!hasValue(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isLocalhostUrl(value) {
+  if (!hasValue(value)) return false;
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    const normalized = String(value).toLowerCase();
+    return (
+      normalized.includes("localhost") ||
+      normalized.includes("127.0.0.1") ||
+      normalized.includes("::1")
+    );
+  }
+}
+
 function printSection(title) {
   console.log(`\n=== ${title} ===`);
 }
 
 async function verifyDatabaseConnection() {
   const { PrismaClient } = await import("@prisma/client");
-  const prisma = new PrismaClient();
+  const directUrl = String(process.env.DIRECT_URL ?? "").trim();
+  const databaseUrl = String(process.env.DATABASE_URL ?? "").trim();
 
-  try {
-    await prisma.$queryRaw`SELECT 1`;
+  const runProbe = async (urlOverride) => {
+    const prisma = new PrismaClient(
+      urlOverride
+        ? {
+            datasources: {
+              db: { url: urlOverride },
+            },
+          }
+        : undefined,
+    );
+
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      return { ok: true, error: null };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown database error";
+      return { ok: false, error: message };
+    } finally {
+      await prisma.$disconnect();
+    }
+  };
+
+  const primaryProbe = await runProbe();
+  if (primaryProbe.ok) {
     console.log("PASS  Database connection is healthy.");
     return null;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown database error";
-    console.log(`FAIL  Database connection failed: ${message}`);
-    return "Database connection failed";
-  } finally {
-    await prisma.$disconnect();
   }
+
+  const canFallback =
+    process.env.NODE_ENV !== "production" &&
+    directUrl &&
+    directUrl !== databaseUrl &&
+    /can't reach database server/i.test(primaryProbe.error ?? "");
+
+  if (canFallback) {
+    const fallbackProbe = await runProbe(directUrl);
+    if (fallbackProbe.ok) {
+      console.log("WARN  DATABASE_URL probe failed, but DIRECT_URL probe succeeded (development fallback).");
+      return null;
+    }
+  }
+
+  console.log(`FAIL  Database connection failed: ${primaryProbe.error ?? "Unknown database error"}`);
+  return "Database connection failed";
 }
 
 async function main() {
@@ -150,6 +228,59 @@ async function main() {
     console.log(`FAIL  SMTP variables are incomplete: ${missingSmtpKeys.join(", ")}`);
   } else {
     console.log("PASS  SMTP is fully configured.");
+  }
+
+  printSection("Payment Gateway Readiness");
+  const cardProvider = detectCardProvider();
+  const strictProduction = isStrictProduction();
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  console.log(`Card provider: ${cardProvider}`);
+  console.log(`Strict production mode: ${strictProduction ? "YES" : "NO"}`);
+
+  if (cardProvider === "STRIPE_CHECKOUT") {
+    for (const key of stripeKeys) {
+      if (!hasValue(process.env[key])) {
+        errors.push(`${key} is missing for Stripe Checkout`);
+        console.log(`FAIL  ${key}`);
+      } else {
+        console.log(`PASS  ${key}`);
+      }
+    }
+
+    if (strictProduction) {
+      if (!isHttpsUrl(appUrl)) {
+        errors.push("NEXT_PUBLIC_APP_URL must be HTTPS when Stripe Checkout is enabled in production.");
+        console.log("FAIL  NEXT_PUBLIC_APP_URL must use https:// in production Stripe mode");
+      } else {
+        console.log("PASS  NEXT_PUBLIC_APP_URL uses HTTPS");
+      }
+
+      if (isLocalhostUrl(appUrl)) {
+        errors.push("NEXT_PUBLIC_APP_URL cannot be localhost in production Stripe mode.");
+        console.log("FAIL  NEXT_PUBLIC_APP_URL points to localhost");
+      }
+
+      const stripeSecretKey = String(process.env.STRIPE_SECRET_KEY ?? "").trim();
+      if (stripeSecretKey && stripeSecretKey.startsWith("sk_test_")) {
+        errors.push("STRIPE_SECRET_KEY is in test mode. Use sk_live_ key for production.");
+        console.log("FAIL  STRIPE_SECRET_KEY is test-mode in production");
+      } else if (stripeSecretKey && stripeSecretKey.startsWith("sk_live_")) {
+        console.log("PASS  STRIPE_SECRET_KEY appears to be live-mode");
+      } else if (stripeSecretKey) {
+        warnings.push("STRIPE_SECRET_KEY format is unrecognized.");
+        console.log("WARN  STRIPE_SECRET_KEY format is unrecognized");
+      }
+    }
+  } else {
+    const stripePresent = stripeKeys.filter((key) => hasValue(process.env[key])).length;
+    if (stripePresent === 0) {
+      console.log("INFO  Stripe keys not required while SANDBOX provider is selected.");
+    } else {
+      warnings.push(
+        "Stripe keys are set but CARD_PAYMENT_PROVIDER is SANDBOX. Confirm intended provider before deploy.",
+      );
+      console.log("WARN  Stripe keys exist while SANDBOX provider is selected");
+    }
   }
 
   printSection("Database Connection");

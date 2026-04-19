@@ -1,13 +1,32 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { CategoryChips } from "@/components/home/category-chips";
 import { MiniProductCard } from "@/components/home/mini-product-card";
 import { ProductStripSection } from "@/components/home/product-strip-section";
 import { PromoBannerRow } from "@/components/home/promo-banner-row";
+import { siteConfig } from "@/lib/constants/site";
 import { getPublicSiteSettings } from "@/lib/services/public-settings-service";
 import { listProducts } from "@/lib/services/product-service";
 import type { Product } from "@/types/product";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Home",
+  description:
+    "Shop trusted deals on electronics, gadgets, lifestyle products, and accessories at Deal Bazaar.",
+  alternates: {
+    canonical: "/",
+  },
+  openGraph: {
+    title: `${siteConfig.name} - Smart Deals Every Day`,
+    description:
+      "Discover trending products, flash offers, and top-rated picks with a premium shopping experience.",
+    url: "/",
+    siteName: siteConfig.name,
+    type: "website",
+  },
+};
 
 function withFallbackProducts(primary: Product[], fallback: Product[], minCount = 10) {
   if (primary.length >= minCount) return primary.slice(0, minCount);
@@ -86,9 +105,15 @@ export default async function HomePage() {
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
-          {homeProducts.map((product) => (
-            <MiniProductCard key={product.id} product={product} />
-          ))}
+          {homeProducts.length > 0 ? (
+            homeProducts.map((product) => <MiniProductCard key={product.id} product={product} />)
+          ) : (
+            <div className="col-span-full rounded-2xl border border-dashed border-border bg-background/60 p-6 text-center">
+              <p className="text-sm text-muted-foreground">
+                No active products yet. Add products from Admin panel to show them here.
+              </p>
+            </div>
+          )}
         </div>
       </section>
 

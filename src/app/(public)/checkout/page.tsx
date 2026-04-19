@@ -12,7 +12,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { formatCurrency } from "@/lib/utils";
-import { convertFromBaseCurrency, roundMoney } from "@/lib/constants/exchange-rates";
+import {
+  convertFromBaseCurrency,
+  getCurrencyDecimals,
+  roundMoney,
+} from "@/lib/constants/exchange-rates";
 import { useCartStore } from "@/store/cart-store";
 import { useUiPreferencesStore } from "@/store/ui-preferences-store";
 import type { CheckoutPayload } from "@/types/cart";
@@ -98,6 +102,12 @@ type ApiEnvelope<T> = {
   success: boolean;
   data?: T;
   error?: string;
+  code?: string;
+  requestId?: string;
+};
+
+type RuntimeHealthResponse = {
+  status?: "ok" | "degraded" | "down";
 };
 
 type OrderCreateResponse = {
@@ -109,8 +119,141 @@ type OrderCreateResponse = {
   } | null;
 };
 
+type CheckoutErrorDiagnostic = {
+  title: string;
+  message: string;
+  status: number | null;
+  code: string | null;
+  requestId: string | null;
+  actions: string[];
+  showHealthLink: boolean;
+};
+
 const lastUsedAddressStorageKey = "deal-bazaar.checkout.last-address-id";
 const isExternalUrl = (url: string) => /^https?:\/\//i.test(url);
+const generateCheckoutRequestKey = () => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `checkout-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+};
+
+function buildCheckoutErrorDiagnostic(input: {
+  message: string;
+  status?: number | null;
+  code?: string | null;
+  requestId?: string | null;
+}): CheckoutErrorDiagnostic {
+  const normalizedCode = input.code?.trim().toUpperCase() ?? null;
+  const status = typeof input.status === "number" ? input.status : null;
+  const requestId = input.requestId?.trim() ? input.requestId.trim() : null;
+  const message = input.message?.trim() || "Unable to place order";
+
+  if (
+    normalizedCode === "DATABASE_UNAVAILABLE" ||
+    normalizedCode === "DATABASE_UNREACHABLE" ||
+    status === 503
+  ) {
+    return {
+      title: "Checkout service is temporarily unavailable",
+      message,
+      status,
+      code: normalizedCode,
+      requestId,
+      showHealthLink: true,
+      actions: [
+        "Open the health page and confirm Database status is not DOWN.",
+        "Check Supabase connection in .env.local (DATABASE_URL and DIRECT_URL).",
+        "Try placing the order again after 30-60 seconds.",
+      ],
+    };
+  }
+
+  if (normalizedCode === "DATABASE_AUTH_FAILED") {
+    return {
+      title: "Database authentication failed",
+      message,
+      status,
+      code: normalizedCode,
+      requestId,
+      showHealthLink: true,
+      actions: [
+        "Verify Supabase DB username/password in DATABASE_URL and DIRECT_URL.",
+        "If password was rotated in Supabase, update all environment values.",
+        "Restart the app after updating env values.",
+      ],
+    };
+  }
+
+  if (
+    normalizedCode === "ORDER_PAYLOAD_INVALID" ||
+    normalizedCode === "IDEMPOTENCY_KEY_INVALID" ||
+    normalizedCode === "CHECKOUT_REQUEST_KEY_INVALID"
+  ) {
+    return {
+      title: "Checkout request needs refresh",
+      message,
+      status,
+      code: normalizedCode,
+      requestId,
+      showHealthLink: false,
+      actions: [
+        "Refresh the checkout page.",
+        "Re-check selected products and payment method.",
+        "Place the order again.",
+      ],
+    };
+  }
+
+  if (
+    normalizedCode === "INSUFFICIENT_STOCK" ||
+    normalizedCode === "INVALID_VARIANT" ||
+    normalizedCode === "PRODUCT_NOT_FOUND"
+  ) {
+    return {
+      title: "Cart items need an update",
+      message,
+      status,
+      code: normalizedCode,
+      requestId,
+      showHealthLink: false,
+      actions: [
+        "Go back to cart and refresh product quantities.",
+        "Remove out-of-stock items or choose another variant.",
+        "Return to checkout and place order again.",
+      ],
+    };
+  }
+
+  if (status === 429) {
+    return {
+      title: "Too many checkout attempts",
+      message,
+      status,
+      code: normalizedCode,
+      requestId,
+      showHealthLink: false,
+      actions: [
+        "Wait a short time and try again.",
+        "Avoid repeated rapid clicks on Place Order.",
+      ],
+    };
+  }
+
+  return {
+    title: "Order could not be placed",
+    message,
+    status,
+    code: normalizedCode,
+    requestId,
+    showHealthLink: true,
+    actions: [
+      "Review shipping and payment details once more.",
+      "Check System Status page for runtime issues.",
+      "Retry placing the order.",
+    ],
+  };
+}
 
 export default function CheckoutPage() {
   const router = useRouter();
@@ -137,6 +280,9 @@ export default function CheckoutPage() {
   const [selectedSavedAddressId, setSelectedSavedAddressId] = useState<string>("");
   const [isMobileSummaryOpen, setIsMobileSummaryOpen] = useState(false);
   const [paymentSelectionNotice, setPaymentSelectionNotice] = useState<string | null>(null);
+  const [orderRequestKey, setOrderRequestKey] = useState<string | null>(null);
+  const [runtimeIssue, setRuntimeIssue] = useState<string | null>(null);
+  const [submitDiagnostic, setSubmitDiagnostic] = useState<CheckoutErrorDiagnostic | null>(null);
 
   const form = useForm<CheckoutFormValues>({
     resolver: zodResolver(checkoutSchema),
@@ -230,6 +376,39 @@ export default function CheckoutPage() {
       active = false;
     };
   }, [form]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function checkRuntimeHealth() {
+      try {
+        const response = await fetch("/api/health", { cache: "no-store" });
+        const payload = (await response.json()) as RuntimeHealthResponse;
+        if (!active) return;
+
+        if (payload?.status === "down") {
+          setRuntimeIssue(
+            "Checkout is temporarily unavailable due to a server connection issue. Please try again shortly.",
+          );
+          return;
+        }
+
+        setRuntimeIssue(null);
+      } catch {
+        if (active) {
+          setRuntimeIssue(
+            "Unable to verify checkout service status right now. Please refresh and try again.",
+          );
+        }
+      }
+    }
+
+    void checkRuntimeHealth();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const applySavedAddress = useMemo(
     () => (address: AccountAddress) => {
@@ -424,12 +603,17 @@ export default function CheckoutPage() {
     setCouponError("Cart or shipping changed. Please apply coupon again.");
   }, [appliedCouponContextKey, checkoutContextKey, couponPreview]);
 
+  useEffect(() => {
+    setOrderRequestKey(null);
+  }, [checkoutContextKey]);
+
+  const currencyDecimals = getCurrencyDecimals(currency);
   const fallbackSubtotal = roundMoney(
     selectedItems.reduce(
       (sum, item) => sum + convertFromBaseCurrency(item.unitPriceBase, currency) * item.quantity,
       0,
     ),
-    currency === "LKR" ? 0 : 2,
+    currencyDecimals,
   );
   const fallbackShippingFee =
     selectedItems.length > 0
@@ -438,11 +622,11 @@ export default function CheckoutPage() {
   const fallbackTaxRate = options?.taxRatePercentage ?? 8;
   const fallbackTaxTotal = roundMoney(
     (fallbackSubtotal + fallbackShippingFee) * (fallbackTaxRate / 100),
-    currency === "LKR" ? 0 : 2,
+    currencyDecimals,
   );
   const fallbackGrandTotal = roundMoney(
     fallbackSubtotal + fallbackShippingFee + fallbackTaxTotal,
-    currency === "LKR" ? 0 : 2,
+    currencyDecimals,
   );
 
   const subtotal = couponPreview?.totals.subtotal ?? fallbackSubtotal;
@@ -455,6 +639,7 @@ export default function CheckoutPage() {
     form.formState.isSubmitting ||
     isApplyingCoupon ||
     isLoadingOptions ||
+    Boolean(runtimeIssue) ||
     !hasEnabledCheckoutPayments ||
     !isSelectedPaymentMethodEnabled;
   const checkoutButtonLabel = form.formState.isSubmitting
@@ -489,6 +674,7 @@ export default function CheckoutPage() {
   async function applyCoupon() {
     setCouponError(null);
     setSubmitError(null);
+    setSubmitDiagnostic(null);
 
     const normalizedCouponCode = couponCode.trim().toUpperCase();
     if (!normalizedCouponCode) {
@@ -528,6 +714,11 @@ export default function CheckoutPage() {
 
   const onSubmit = form.handleSubmit(async (values) => {
     setSubmitError(null);
+    setSubmitDiagnostic(null);
+    const requestKey = orderRequestKey ?? generateCheckoutRequestKey();
+    if (!orderRequestKey) {
+      setOrderRequestKey(requestKey);
+    }
 
     try {
       const normalizedCouponCode = (couponPreview?.coupon.code ?? couponCode).trim().toUpperCase();
@@ -568,15 +759,28 @@ export default function CheckoutPage() {
 
       const response = await fetch("/api/orders", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": requestKey,
+        },
         body: JSON.stringify(payload),
       });
 
       const result = (await response.json()) as ApiEnvelope<OrderCreateResponse>;
       if (!response.ok || !result.success || !result.data?.id) {
-        throw new Error(result.error ?? "Unable to place order");
+        const diagnostic = buildCheckoutErrorDiagnostic({
+          message: result.error ?? "Unable to place order",
+          status: response.status,
+          code: result.code,
+          requestId: result.requestId ?? response.headers.get("x-request-id"),
+        });
+        setSubmitDiagnostic(diagnostic);
+        setSubmitError(diagnostic.message);
+        return;
       }
 
+      setOrderRequestKey(null);
+      setSubmitDiagnostic(null);
       removeMany(selectedItems.map((item) => item.lineId));
       clearSelection();
 
@@ -592,7 +796,11 @@ export default function CheckoutPage() {
 
       router.push(`/checkout/success?orderId=${encodeURIComponent(result.data.id)}`);
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : "Unable to place order");
+      const diagnostic = buildCheckoutErrorDiagnostic({
+        message: error instanceof Error ? error.message : "Unable to place order",
+      });
+      setSubmitDiagnostic(diagnostic);
+      setSubmitError(diagnostic.message);
     }
   });
 
@@ -841,7 +1049,45 @@ export default function CheckoutPage() {
           />
         </div>
 
-        {submitError ? <p className="text-sm text-red-600">{submitError}</p> : null}
+        {runtimeIssue ? (
+          <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+            {runtimeIssue}
+          </p>
+        ) : null}
+        {submitDiagnostic ? (
+          <div className="space-y-3 rounded-xl border border-red-500/35 bg-red-500/10 p-3 text-red-700 dark:text-red-300">
+            <p className="text-sm font-semibold">{submitDiagnostic.title}</p>
+            <p className="text-sm">{submitDiagnostic.message}</p>
+            <ul className="list-disc space-y-1 pl-5 text-xs">
+              {submitDiagnostic.actions.map((action) => (
+                <li key={action}>{action}</li>
+              ))}
+            </ul>
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              {submitDiagnostic.status ? (
+                <span className="rounded-full border border-red-500/35 bg-background px-2 py-0.5 text-foreground">
+                  HTTP {submitDiagnostic.status}
+                </span>
+              ) : null}
+              {submitDiagnostic.code ? (
+                <span className="rounded-full border border-red-500/35 bg-background px-2 py-0.5 font-mono text-foreground">
+                  {submitDiagnostic.code}
+                </span>
+              ) : null}
+              {submitDiagnostic.requestId ? (
+                <span className="rounded-full border border-red-500/35 bg-background px-2 py-0.5 font-mono text-foreground">
+                  Request: {submitDiagnostic.requestId}
+                </span>
+              ) : null}
+            </div>
+            {submitDiagnostic.showHealthLink ? (
+              <Link href="/health" className="inline-flex text-xs font-semibold text-primary hover:underline">
+                Open System Status
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
+        {submitError && !submitDiagnostic ? <p className="text-sm text-red-600">{submitError}</p> : null}
       </section>
 
       <aside className="h-fit space-y-4 rounded-2xl border border-border bg-card p-4 sm:p-5 lg:sticky lg:top-24">

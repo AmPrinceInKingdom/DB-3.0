@@ -3,18 +3,37 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import { Bookmark, Minus, Plus, ShoppingBag, Trash2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { convertFromBaseCurrency, roundMoney } from "@/lib/constants/exchange-rates";
+import {
+  convertFromBaseCurrency,
+  getCurrencyDecimals,
+  roundMoney,
+} from "@/lib/constants/exchange-rates";
 import { formatCurrency } from "@/lib/utils";
 import { useUiPreferencesStore } from "@/store/ui-preferences-store";
 import { useCartStore } from "@/store/cart-store";
 
-const taxRatePercentage = 8;
+type CheckoutOptionsResponse = {
+  shippingMethods: Array<{
+    code: string;
+    name: string;
+    baseFeeLkr: number;
+  }>;
+  taxRatePercentage: number;
+};
+
+type ApiEnvelope<T> = {
+  success: boolean;
+  data?: T;
+  error?: string;
+};
 
 export default function CartPage() {
   const router = useRouter();
   const currency = useUiPreferencesStore((state) => state.currency);
+  const [checkoutOptions, setCheckoutOptions] = useState<CheckoutOptionsResponse | null>(null);
   const items = useCartStore((state) => state.items);
   const savedItems = useCartStore((state) => state.savedItems);
   const selectedLineIds = useCartStore((state) => state.selectedLineIds);
@@ -32,6 +51,32 @@ export default function CartPage() {
   const selectedSet = new Set(selectedLineIds);
   const selectedItems = items.filter((item) => selectedSet.has(item.lineId));
   const allSelected = items.length > 0 && selectedItems.length === items.length;
+  const currencyDecimals = getCurrencyDecimals(currency);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const loadCheckoutOptions = async () => {
+      try {
+        const response = await fetch("/api/checkout/options", { cache: "no-store" });
+        const payload = (await response.json()) as ApiEnvelope<CheckoutOptionsResponse>;
+        if (!response.ok || !payload.success || !payload.data) return;
+        if (isCancelled) return;
+        setCheckoutOptions(payload.data);
+      } catch {
+        // Keep fallback pricing defaults when options are unavailable.
+      }
+    };
+
+    void loadCheckoutOptions();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  const taxRatePercentage = checkoutOptions?.taxRatePercentage ?? 8;
+  const defaultShippingFeeLkr = checkoutOptions?.shippingMethods[0]?.baseFeeLkr ?? 450;
 
   const subtotal = roundMoney(
     selectedItems.reduce(
@@ -39,19 +84,17 @@ export default function CartPage() {
         sum + convertFromBaseCurrency(item.unitPriceBase, currency) * item.quantity,
       0,
     ),
-    currency === "LKR" ? 0 : 2,
+    currencyDecimals,
   );
   const shippingFee =
     selectedItems.length === 0
       ? 0
-      : subtotal > convertFromBaseCurrency(5000, currency)
-        ? 0
-        : convertFromBaseCurrency(450, currency);
+      : convertFromBaseCurrency(defaultShippingFeeLkr, currency);
   const taxTotal = roundMoney(
     (subtotal + shippingFee) * (taxRatePercentage / 100),
-    currency === "LKR" ? 0 : 2,
+    currencyDecimals,
   );
-  const grandTotal = roundMoney(subtotal + shippingFee + taxTotal, currency === "LKR" ? 0 : 2);
+  const grandTotal = roundMoney(subtotal + shippingFee + taxTotal, currencyDecimals);
 
   if (!items.length && !savedItems.length) {
     return (
@@ -308,7 +351,7 @@ export default function CartPage() {
             <span>{formatCurrency(subtotal, currency)}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Shipping</span>
+            <span className="text-muted-foreground">Shipping (Estimated)</span>
             <span>{formatCurrency(shippingFee, currency)}</span>
           </div>
           <div className="flex items-center justify-between">

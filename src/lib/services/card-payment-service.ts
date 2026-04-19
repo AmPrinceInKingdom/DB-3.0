@@ -408,6 +408,7 @@ async function applyCardPaymentOutcomeTx(
       paymentStatus: nextPaymentStatus,
       ...(nextOrderStatus !== payment.order.status ? { status: nextOrderStatus } : {}),
     },
+    select: { id: true },
   });
 
   if (nextOrderStatus !== payment.order.status) {
@@ -575,6 +576,7 @@ export async function createCardPaymentSessionForOrderTx(
     data: {
       paymentStatus: PaymentStatus.PENDING,
     },
+    select: { id: true },
   });
 
   return {

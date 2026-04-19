@@ -34,6 +34,7 @@ export const adminNavItems: NavItem[] = [
   { label: "Orders", href: "/admin/orders" },
   { label: "Payments", href: "/admin/payments" },
   { label: "Payment Gateway", href: "/admin/payment-gateway" },
+  { label: "Auth Diagnostics", href: "/admin/auth-diagnostics" },
   { label: "DB Export", href: "/admin/db-export" },
   { label: "Payouts", href: "/admin/payouts" },
   { label: "Users", href: "/admin/users" },

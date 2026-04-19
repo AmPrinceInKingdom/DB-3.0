@@ -25,10 +25,10 @@ import {
   getExchangeRateToBase,
   roundMoney,
 } from "@/lib/constants/exchange-rates";
-import { allHomeProducts } from "@/lib/constants/mock-data";
 import type { SessionPayload } from "@/lib/auth/types";
 import type { CreateOrderInput, PreviewCouponInput } from "@/lib/validators/checkout";
 import {
+  createCardPaymentSessionForOrder,
   createCardPaymentSessionForOrderTx,
   type CardPaymentSessionCreateResult,
 } from "@/lib/services/card-payment-service";
@@ -49,7 +49,40 @@ function toNumber(value: unknown, fallback = 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   }
+  if (typeof value === "bigint") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  if (value && typeof value === "object") {
+    const decimalLike = value as {
+      toNumber?: () => number;
+      toString?: () => string;
+      valueOf?: () => unknown;
+    };
+
+    if (typeof decimalLike.toNumber === "function") {
+      const parsed = decimalLike.toNumber();
+      if (Number.isFinite(parsed)) return parsed;
+    }
+
+    if (typeof decimalLike.toString === "function") {
+      const parsed = Number(decimalLike.toString());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+
+    if (typeof decimalLike.valueOf === "function") {
+      const parsed = Number(decimalLike.valueOf());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
   return fallback;
+}
+
+function isKnownPrismaError(error: unknown, code: string) {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === code
+  );
 }
 
 function parseNumberSetting(value: unknown, fallback: number) {
@@ -100,6 +133,42 @@ function buildOrderNumber() {
 function normalizeOptionalText(value: string | null | undefined, fallback = "") {
   const text = value?.trim();
   return text && text.length > 0 ? text : fallback;
+}
+
+const clientRequestIdPattern = /^[A-Za-z0-9._:-]{8,120}$/;
+let orderClientRequestIdColumnSupported: boolean | null = null;
+
+async function supportsOrderClientRequestIdColumn() {
+  if (orderClientRequestIdColumnSupported !== null) {
+    return orderClientRequestIdColumnSupported;
+  }
+
+  try {
+    const rows = await db.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'orders'
+          AND column_name = 'client_request_id'
+      ) AS "exists"
+    `;
+    orderClientRequestIdColumnSupported = rows[0]?.exists === true;
+  } catch {
+    orderClientRequestIdColumnSupported = false;
+  }
+
+  return orderClientRequestIdColumnSupported;
+}
+
+function normalizeClientRequestId(value?: string | null) {
+  if (!value) return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (!clientRequestIdPattern.test(normalized)) {
+    throw new AppError("Checkout request key format is invalid.", 400, "CHECKOUT_REQUEST_KEY_INVALID");
+  }
+  return normalized;
 }
 
 function serializeAddress(address: CreateOrderInput["billingAddress"]) {
@@ -357,7 +426,7 @@ type VariantStockAdjustment = {
   quantity: number;
 };
 
-const fallbackImageUrl = allHomeProducts[0]?.imageUrl ?? "/next.svg";
+const fallbackImageUrl = "/next.svg";
 
 function resolveStockStatus(quantity: number, minStockLevel: number): StockStatus {
   if (quantity <= 0) return StockStatus.OUT_OF_STOCK;
@@ -428,81 +497,68 @@ async function resolveTrustedCheckoutItems(items: CreateOrderInput["items"]): Pr
   const variantMap = new Map(variants.map((variant) => [variant.id, variant]));
 
   return items.map((item) => {
-    if (isUuid(item.productId)) {
-      const product = productMap.get(item.productId);
-      if (!product) {
-        throw new AppError("One or more products no longer exist. Please refresh cart.", 400, "PRODUCT_NOT_FOUND");
-      }
-      if (product.status !== "ACTIVE") {
-        throw new AppError(`${product.name} is currently unavailable.`, 400, "PRODUCT_INACTIVE");
-      }
-
-      const requestedVariantId = item.variantId?.trim();
-      const hasVariantRequest = Boolean(requestedVariantId);
-
-      if (hasVariantRequest && !isUuid(requestedVariantId!)) {
-        throw new AppError(`Invalid variant selected for ${product.name}.`, 400, "INVALID_VARIANT");
-      }
-
-      const variant = requestedVariantId ? variantMap.get(requestedVariantId) : null;
-      if (requestedVariantId && (!variant || variant.productId !== product.id)) {
-        throw new AppError(`Selected variant for ${product.name} is no longer available.`, 400, "INVALID_VARIANT");
-      }
-      if (variant && !variant.isActive) {
-        throw new AppError(`Selected variant for ${product.name} is inactive.`, 400, "VARIANT_INACTIVE");
-      }
-
-      const availableStock = variant ? variant.stockQuantity : product.stockQuantity;
-      if (item.quantity > availableStock) {
-        throw new AppError(
-          `Only ${availableStock} unit(s) available for ${product.name}.`,
-          400,
-          "INSUFFICIENT_STOCK",
-        );
-      }
-
-      const unitPriceBase = variant ? toNumber(variant.price) : toNumber(product.currentPrice);
-      if (unitPriceBase <= 0) {
-        throw new AppError(`Invalid pricing detected for ${product.name}.`, 400, "INVALID_PRODUCT_PRICE");
-      }
-
-      const resolvedVariantLabel = normalizeOptionalText(item.variantLabel, variant?.name ?? "");
-
-      return {
-        productId: product.id,
-        sellerId: product.sellerId ?? null,
-        categoryId: product.categoryId,
-        variantId: variant?.id ?? null,
-        variantLabel: resolvedVariantLabel || null,
-        productName: product.name,
-        slug: product.slug,
-        brand: normalizeOptionalText(product.brand?.name, "Deal Bazaar"),
-        imageUrl: normalizeOptionalText(variant?.imageUrl, product.images[0]?.imageUrl ?? fallbackImageUrl),
-        quantity: item.quantity,
-        unitPriceBase,
-      } satisfies TrustedCheckoutItem;
+    if (!isUuid(item.productId)) {
+      throw new AppError(
+        "One or more selected products are invalid. Please refresh your cart and try again.",
+        400,
+        "PRODUCT_NOT_FOUND",
+      );
     }
 
-    const mockProduct = allHomeProducts.find((product) => product.id === item.productId);
-    if (!mockProduct) {
+    const product = productMap.get(item.productId);
+    if (!product) {
       throw new AppError("One or more selected products are invalid. Please refresh cart.", 400, "PRODUCT_NOT_FOUND");
     }
-    if (!mockProduct.inStock) {
-      throw new AppError(`${mockProduct.name} is out of stock.`, 400, "INSUFFICIENT_STOCK");
+    if (product.status !== "ACTIVE") {
+      throw new AppError(`${product.name} is currently unavailable.`, 400, "PRODUCT_INACTIVE");
     }
 
+    const requestedVariantId = item.variantId?.trim();
+    const hasVariantRequest = Boolean(requestedVariantId);
+
+    if (hasVariantRequest && !isUuid(requestedVariantId!)) {
+      throw new AppError(`Invalid variant selected for ${product.name}.`, 400, "INVALID_VARIANT");
+    }
+
+    const variant = requestedVariantId ? variantMap.get(requestedVariantId) : null;
+    if (requestedVariantId && (!variant || variant.productId !== product.id)) {
+      throw new AppError(`Selected variant for ${product.name} is no longer available.`, 400, "INVALID_VARIANT");
+    }
+    if (variant && !variant.isActive) {
+      throw new AppError(`Selected variant for ${product.name} is inactive.`, 400, "VARIANT_INACTIVE");
+    }
+
+    const availableStock = variant ? variant.stockQuantity : product.stockQuantity;
+    if (item.quantity > availableStock) {
+      throw new AppError(
+        `Only ${availableStock} unit(s) available for ${product.name}.`,
+        400,
+        "INSUFFICIENT_STOCK",
+      );
+    }
+
+    const productPriceBase = toNumber(product.currentPrice);
+    const variantPriceBase = variant ? toNumber(variant.price, productPriceBase) : null;
+    const unitPriceBase =
+      variantPriceBase !== null && variantPriceBase > 0 ? variantPriceBase : productPriceBase;
+    if (unitPriceBase <= 0) {
+      throw new AppError(`Invalid pricing detected for ${product.name}.`, 400, "INVALID_PRODUCT_PRICE");
+    }
+
+    const resolvedVariantLabel = normalizeOptionalText(item.variantLabel, variant?.name ?? "");
+
     return {
-      productId: mockProduct.id,
-      sellerId: null,
-      categoryId: null,
-      variantId: item.variantId ?? null,
-      variantLabel: normalizeOptionalText(item.variantLabel) || null,
-      productName: mockProduct.name,
-      slug: mockProduct.slug,
-      brand: mockProduct.brand,
-      imageUrl: normalizeOptionalText(item.imageUrl, mockProduct.imageUrl),
+      productId: product.id,
+      sellerId: product.sellerId ?? null,
+      categoryId: product.categoryId,
+      variantId: variant?.id ?? null,
+      variantLabel: resolvedVariantLabel || null,
+      productName: product.name,
+      slug: product.slug,
+      brand: normalizeOptionalText(product.brand?.name, "Deal Bazaar"),
+      imageUrl: normalizeOptionalText(variant?.imageUrl, product.images[0]?.imageUrl ?? fallbackImageUrl),
       quantity: item.quantity,
-      unitPriceBase: mockProduct.price,
+      unitPriceBase,
     } satisfies TrustedCheckoutItem;
   });
 }
@@ -511,10 +567,28 @@ function resolveShippingMethodOption(
   options: CheckoutOptions,
   shippingMethodCode: string,
 ) {
-  return (
-    options.shippingMethods.find((method) => method.code === shippingMethodCode) ??
-    options.shippingMethods[0]
+  if (!options.shippingMethods.length) {
+    throw new AppError(
+      "Shipping methods are not configured. Please contact support.",
+      500,
+      "SHIPPING_METHODS_NOT_CONFIGURED",
+    );
+  }
+
+  const normalizedCode = shippingMethodCode.trim().toUpperCase();
+  const selectedMethod = options.shippingMethods.find(
+    (method) => method.code.trim().toUpperCase() === normalizedCode,
   );
+
+  if (!selectedMethod) {
+    throw new AppError(
+      "Selected shipping method is unavailable. Please refresh checkout and try again.",
+      400,
+      "SHIPPING_METHOD_INVALID",
+    );
+  }
+
+  return selectedMethod;
 }
 
 function calculateSubtotalBase(items: TrustedCheckoutItem[]) {
@@ -801,10 +875,10 @@ async function applyOrderStockDeductions(
     actorUserId?: string | null;
     lines: CalculatedLine[];
   },
-) {
+): Promise<string[]> {
   const { productAdjustments, variantAdjustments } = collectStockAdjustments(input.lines);
   if (productAdjustments.length === 0 && variantAdjustments.length === 0) {
-    return;
+    return [];
   }
 
   for (const adjustment of variantAdjustments) {
@@ -949,10 +1023,7 @@ async function applyOrderStockDeductions(
     });
   }
 
-  await emitLowStockAdminAlerts(tx, {
-    productIds: productAdjustments.map((adjustment) => adjustment.productId),
-    source: "ORDER_PLACED",
-  });
+  return productAdjustments.map((adjustment) => adjustment.productId);
 }
 
 export async function previewCheckoutCoupon(
@@ -1000,7 +1071,135 @@ export async function previewCheckoutCoupon(
   };
 }
 
-export async function createOrder(input: CreateOrderInput, session: SessionPayload | null) {
+type CheckoutCreateOrderRecord = {
+  id: string;
+  orderNumber: string;
+  paymentMethod: PaymentMethod;
+  paymentStatus: PaymentStatus;
+  status: OrderStatus;
+  grandTotal: Prisma.Decimal | number | string;
+  discountTotal: Prisma.Decimal | number | string;
+  currencyCode: string;
+  createdAt: Date;
+};
+
+type CheckoutCreateOrderResponse = CheckoutCreateOrderRecord & {
+  grandTotal: number;
+  discountTotal: number;
+  coupon: { code: string; title: string } | null;
+  bankTransfer: BankTransferDetails | null;
+  cardPayment: CardPaymentSessionCreateResult | null;
+};
+
+type CreateOrderOptions = {
+  clientRequestId?: string | null;
+};
+
+function toCheckoutCreateOrderResponse(params: {
+  created: CheckoutCreateOrderRecord;
+  options: CheckoutOptions;
+  coupon: { code: string; title: string } | null;
+  cardPayment: CardPaymentSessionCreateResult | null;
+}): CheckoutCreateOrderResponse {
+  const { created, options, coupon, cardPayment } = params;
+
+  return {
+    ...created,
+    grandTotal: toNumber(created.grandTotal),
+    discountTotal: toNumber(created.discountTotal),
+    coupon,
+    bankTransfer:
+      created.paymentMethod === PaymentMethod.BANK_TRANSFER
+        ? options.bankTransfer
+        : null,
+    cardPayment:
+      created.paymentMethod === PaymentMethod.CARD
+        ? cardPayment
+        : null,
+  };
+}
+
+async function findExistingOrderByClientRequestId(input: {
+  clientRequestId: string;
+  inputCustomerEmail: string;
+  session: SessionPayload | null;
+  options: CheckoutOptions;
+}): Promise<CheckoutCreateOrderResponse | null> {
+  const clientRequestIdSupported = await supportsOrderClientRequestIdColumn();
+  if (!clientRequestIdSupported) return null;
+
+  const existing = await db.order.findUnique({
+    where: { clientRequestId: input.clientRequestId },
+    select: {
+      id: true,
+      orderNumber: true,
+      userId: true,
+      customerEmail: true,
+      paymentMethod: true,
+      paymentStatus: true,
+      status: true,
+      grandTotal: true,
+      discountTotal: true,
+      currencyCode: true,
+      createdAt: true,
+      coupon: {
+        select: {
+          code: true,
+          title: true,
+        },
+      },
+    },
+  });
+
+  if (!existing) return null;
+
+  if (input.session?.sub) {
+    if (existing.userId !== input.session.sub) {
+      throw new AppError(
+        "Checkout request key is already used by another account.",
+        409,
+        "CHECKOUT_REQUEST_KEY_CONFLICT",
+      );
+    }
+  } else if (
+    existing.userId !== null ||
+    existing.customerEmail.toLowerCase() !== input.inputCustomerEmail.toLowerCase()
+  ) {
+    throw new AppError(
+      "Checkout request key is already used by another session.",
+      409,
+      "CHECKOUT_REQUEST_KEY_CONFLICT",
+    );
+  }
+
+  let cardPayment: CardPaymentSessionCreateResult | null = null;
+  if (
+    existing.paymentMethod === PaymentMethod.CARD &&
+    existing.paymentStatus !== PaymentStatus.PAID &&
+    existing.status !== OrderStatus.CANCELLED &&
+    existing.status !== OrderStatus.REFUNDED
+  ) {
+    cardPayment = await createCardPaymentSessionForOrder(existing.id);
+  }
+
+  return toCheckoutCreateOrderResponse({
+    created: existing,
+    options: input.options,
+    coupon: existing.coupon
+      ? {
+          code: existing.coupon.code,
+          title: existing.coupon.title,
+        }
+      : null,
+    cardPayment,
+  });
+}
+
+export async function createOrder(
+  input: CreateOrderInput,
+  session: SessionPayload | null,
+  optionsInput: CreateOrderOptions = {},
+) {
   const options = await getCheckoutOptions();
   const selectedPaymentMethod = options.paymentMethods.find(
     (method) => method.code === input.paymentMethod,
@@ -1011,6 +1210,22 @@ export async function createOrder(input: CreateOrderInput, session: SessionPaylo
       400,
       "PAYMENT_METHOD_DISABLED",
     );
+  }
+
+  const clientRequestId = normalizeClientRequestId(optionsInput.clientRequestId);
+  const canUseClientRequestId =
+    clientRequestId ? await supportsOrderClientRequestIdColumn() : false;
+
+  if (clientRequestId && canUseClientRequestId) {
+    const existingOrder = await findExistingOrderByClientRequestId({
+      clientRequestId,
+      inputCustomerEmail: input.customerEmail,
+      session,
+      options,
+    });
+    if (existingOrder) {
+      return existingOrder;
+    }
   }
 
   const shippingMethod = resolveShippingMethodOption(options, input.shippingMethodCode);
@@ -1041,236 +1256,253 @@ export async function createOrder(input: CreateOrderInput, session: SessionPaylo
 
   let responseCoupon: { code: string; title: string } | null = null;
   let responseCardPayment: CardPaymentSessionCreateResult | null = null;
+  let stockAlertProductIds: string[] = [];
 
-  const created = await db.$transaction(async (tx) => {
-    const appliedCoupon = await resolveCouponDiscount(tx, {
-      couponCode: input.couponCode,
-      items: trustedItems,
-      userId: session?.sub ?? null,
-      reserveUsage: true,
-    });
-
-    responseCoupon = appliedCoupon
-      ? { code: appliedCoupon.code, title: appliedCoupon.title }
-      : null;
-
-    const amounts = calculateOrderAmounts(
-      trustedItems,
-      input.currencyCode,
-      shippingFeeLkr,
-      options.taxRatePercentage,
-      appliedCoupon?.discountAmountBase ?? 0,
-    );
-
-    let billingAddressId: string | null = null;
-    let shippingAddressId: string | null = null;
-
-    if (!session?.sub && (input.billingAddressId || input.shippingAddressId)) {
-      throw new AppError(
-        "Sign in to use saved addresses from your account.",
-        401,
-        "AUTH_REQUIRED_FOR_SAVED_ADDRESS",
-      );
-    }
-
-    if (session?.sub) {
-      const selectedAddressIds = [input.billingAddressId, input.shippingAddressId].filter(
-        (value): value is string => Boolean(value),
-      );
-
-      if (selectedAddressIds.length > 0) {
-        const selectedAddresses = await tx.address.findMany({
-          where: {
-            userId: session.sub,
-            id: { in: selectedAddressIds },
-          },
-          select: { id: true },
-        });
-
-        const selectedAddressMap = new Set(selectedAddresses.map((address) => address.id));
-
-        if (input.billingAddressId && !selectedAddressMap.has(input.billingAddressId)) {
-          throw new AppError("Selected billing address is invalid.", 400, "INVALID_BILLING_ADDRESS");
-        }
-
-        if (input.shippingAddressId && !selectedAddressMap.has(input.shippingAddressId)) {
-          throw new AppError(
-            "Selected shipping address is invalid.",
-            400,
-            "INVALID_SHIPPING_ADDRESS",
-          );
-        }
-      }
-
-      if (input.billingAddressId) {
-        billingAddressId = input.billingAddressId;
-      } else {
-        const billingAddress = await tx.address.create({
-          data: {
-            userId: session.sub,
-            label: "Checkout Billing",
-            firstName: input.billingAddress.firstName,
-            lastName: input.billingAddress.lastName,
-            company: input.billingAddress.company,
-            phone: input.billingAddress.phone,
-            line1: input.billingAddress.line1,
-            line2: input.billingAddress.line2,
-            city: input.billingAddress.city,
-            state: input.billingAddress.state,
-            postalCode: input.billingAddress.postalCode,
-            countryCode: input.billingAddress.countryCode,
-          },
-          select: { id: true },
-        });
-        billingAddressId = billingAddress.id;
-      }
-
-      if (input.shippingAddressId) {
-        shippingAddressId = input.shippingAddressId;
-      } else {
-        const shippingAddress = await tx.address.create({
-          data: {
-            userId: session.sub,
-            label: "Checkout Shipping",
-            firstName: input.shippingAddress.firstName,
-            lastName: input.shippingAddress.lastName,
-            company: input.shippingAddress.company,
-            phone: input.shippingAddress.phone,
-            line1: input.shippingAddress.line1,
-            line2: input.shippingAddress.line2,
-            city: input.shippingAddress.city,
-            state: input.shippingAddress.state,
-            postalCode: input.shippingAddress.postalCode,
-            countryCode: input.shippingAddress.countryCode,
-          },
-          select: { id: true },
-        });
-        shippingAddressId = shippingAddress.id;
-      }
-    }
-
-    const order = await tx.order.create({
-      data: {
-        orderNumber: buildOrderNumber(),
+  let created: CheckoutCreateOrderRecord;
+  try {
+    created = await db.$transaction(async (tx) => {
+      const appliedCoupon = await resolveCouponDiscount(tx, {
+        couponCode: input.couponCode,
+        items: trustedItems,
         userId: session?.sub ?? null,
-        billingAddressId,
-        shippingAddressId,
-        shippingMethodId: shippingMethodRow?.id ?? null,
-        status: OrderStatus.PENDING,
-        paymentStatus: initialPaymentStatus,
-        paymentMethod: paymentMethodEnum,
-        currencyCode: input.currencyCode,
-        exchangeRateToBase: amounts.exchangeRateToBase,
-        subtotal: amounts.subtotal,
-        discountTotal: amounts.discountTotal,
-        shippingFee: amounts.shippingFee,
-        taxTotal: amounts.taxTotal,
-        grandTotal: amounts.grandTotal,
-        couponId: appliedCoupon?.id ?? null,
-        customerEmail: input.customerEmail,
-        customerPhone: input.customerPhone,
-        notes: noteParts.length ? noteParts.join("\n\n") : null,
-      },
-      select: {
-        id: true,
-        orderNumber: true,
-        paymentMethod: true,
-        paymentStatus: true,
-        status: true,
-        grandTotal: true,
-        discountTotal: true,
-        currencyCode: true,
-        createdAt: true,
-      },
-    });
+        reserveUsage: true,
+      });
 
-    await applyOrderStockDeductions(tx, {
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      actorUserId: session?.sub ?? null,
-      lines: amounts.lines,
-    });
+      responseCoupon = appliedCoupon
+        ? { code: appliedCoupon.code, title: appliedCoupon.title }
+        : null;
 
-    await tx.orderItem.createMany({
-      data: amounts.lines.map((line) => ({
-        orderId: order.id,
-        productId: isUuid(line.productId) ? line.productId : null,
-        variantId: line.variantId && isUuid(line.variantId) ? line.variantId : null,
-        sellerId: line.sellerId && isUuid(line.sellerId) ? line.sellerId : null,
-        productName: line.productName,
-        sku: null,
-        variantName: line.variantLabel,
-        unitPrice: line.unitPrice,
-        quantity: line.quantity,
-        lineTotal: line.lineTotal,
-        currencyCode: input.currencyCode,
-        metadata: {
-          slug: line.slug,
-          brand: line.brand,
-          imageUrl: line.imageUrl,
-          unitPriceBase: line.unitPriceBase,
-        } satisfies Prisma.InputJsonValue,
-      })),
-    });
+      const amounts = calculateOrderAmounts(
+        trustedItems,
+        input.currencyCode,
+        shippingFeeLkr,
+        options.taxRatePercentage,
+        appliedCoupon?.discountAmountBase ?? 0,
+      );
 
-    await tx.payment.create({
-      data: {
-        orderId: order.id,
-        paymentMethod: paymentMethodEnum,
-        paymentStatus: initialPaymentStatus,
-        transactionReference:
-          paymentMethodEnum === PaymentMethod.CARD ? null : `TXN-${order.orderNumber}`,
-        gateway:
-          paymentMethodEnum === PaymentMethod.CARD
-            ? "CARD_GATEWAY_PENDING"
-            : "MANUAL_BANK_TRANSFER",
-        amount: amounts.grandTotal,
-        currencyCode: input.currencyCode,
-      },
-    });
+      let billingAddressId: string | null = null;
+      let shippingAddressId: string | null = null;
 
-    if (paymentMethodEnum === PaymentMethod.CARD) {
-      responseCardPayment = await createCardPaymentSessionForOrderTx(tx, order.id);
-    }
+      if (!session?.sub && (input.billingAddressId || input.shippingAddressId)) {
+        throw new AppError(
+          "Sign in to use saved addresses from your account.",
+          401,
+          "AUTH_REQUIRED_FOR_SAVED_ADDRESS",
+        );
+      }
 
-    if (appliedCoupon) {
-      await tx.couponUsage.create({
+      if (session?.sub) {
+        const selectedAddressIds = [input.billingAddressId, input.shippingAddressId].filter(
+          (value): value is string => Boolean(value),
+        );
+
+        if (selectedAddressIds.length > 0) {
+          const selectedAddresses = await tx.address.findMany({
+            where: {
+              userId: session.sub,
+              id: { in: selectedAddressIds },
+            },
+            select: { id: true },
+          });
+
+          const selectedAddressMap = new Set(selectedAddresses.map((address) => address.id));
+
+          if (input.billingAddressId && !selectedAddressMap.has(input.billingAddressId)) {
+            throw new AppError("Selected billing address is invalid.", 400, "INVALID_BILLING_ADDRESS");
+          }
+
+          if (input.shippingAddressId && !selectedAddressMap.has(input.shippingAddressId)) {
+            throw new AppError(
+              "Selected shipping address is invalid.",
+              400,
+              "INVALID_SHIPPING_ADDRESS",
+            );
+          }
+        }
+
+        if (input.billingAddressId) {
+          billingAddressId = input.billingAddressId;
+        } else {
+          const billingAddress = await tx.address.create({
+            data: {
+              userId: session.sub,
+              label: "Checkout Billing",
+              firstName: input.billingAddress.firstName,
+              lastName: input.billingAddress.lastName,
+              company: input.billingAddress.company,
+              phone: input.billingAddress.phone,
+              line1: input.billingAddress.line1,
+              line2: input.billingAddress.line2,
+              city: input.billingAddress.city,
+              state: input.billingAddress.state,
+              postalCode: input.billingAddress.postalCode,
+              countryCode: input.billingAddress.countryCode,
+            },
+            select: { id: true },
+          });
+          billingAddressId = billingAddress.id;
+        }
+
+        if (input.shippingAddressId) {
+          shippingAddressId = input.shippingAddressId;
+        } else {
+          const shippingAddress = await tx.address.create({
+            data: {
+              userId: session.sub,
+              label: "Checkout Shipping",
+              firstName: input.shippingAddress.firstName,
+              lastName: input.shippingAddress.lastName,
+              company: input.shippingAddress.company,
+              phone: input.shippingAddress.phone,
+              line1: input.shippingAddress.line1,
+              line2: input.shippingAddress.line2,
+              city: input.shippingAddress.city,
+              state: input.shippingAddress.state,
+              postalCode: input.shippingAddress.postalCode,
+              countryCode: input.shippingAddress.countryCode,
+            },
+            select: { id: true },
+          });
+          shippingAddressId = shippingAddress.id;
+        }
+      }
+
+      const order = await tx.order.create({
         data: {
-          couponId: appliedCoupon.id,
+          orderNumber: buildOrderNumber(),
+          ...(canUseClientRequestId ? { clientRequestId } : {}),
           userId: session?.sub ?? null,
-          orderId: order.id,
-          discountAmount: appliedCoupon.discountAmountBase,
+          billingAddressId,
+          shippingAddressId,
+          shippingMethodId: shippingMethodRow?.id ?? null,
+          status: OrderStatus.PENDING,
+          paymentStatus: initialPaymentStatus,
+          paymentMethod: paymentMethodEnum,
+          currencyCode: input.currencyCode,
+          exchangeRateToBase: amounts.exchangeRateToBase,
+          subtotal: amounts.subtotal,
+          discountTotal: amounts.discountTotal,
+          shippingFee: amounts.shippingFee,
+          taxTotal: amounts.taxTotal,
+          grandTotal: amounts.grandTotal,
+          couponId: appliedCoupon?.id ?? null,
+          customerEmail: input.customerEmail,
+          customerPhone: input.customerPhone,
+          notes: noteParts.length ? noteParts.join("\n\n") : null,
+        },
+        select: {
+          id: true,
+          orderNumber: true,
+          paymentMethod: true,
+          paymentStatus: true,
+          status: true,
+          grandTotal: true,
+          discountTotal: true,
+          currencyCode: true,
+          createdAt: true,
         },
       });
-    }
 
-    await tx.orderStatusHistory.create({
-      data: {
+      stockAlertProductIds = await applyOrderStockDeductions(tx, {
         orderId: order.id,
-        oldStatus: null,
-        newStatus: OrderStatus.PENDING,
-        changedBy: session?.sub ?? null,
-        note: "Order placed from checkout flow",
-      },
-    });
+        orderNumber: order.orderNumber,
+        actorUserId: session?.sub ?? null,
+        lines: amounts.lines,
+      });
 
-    return order;
-  });
+      await tx.orderItem.createMany({
+        data: amounts.lines.map((line) => ({
+          orderId: order.id,
+          productId: isUuid(line.productId) ? line.productId : null,
+          variantId: line.variantId && isUuid(line.variantId) ? line.variantId : null,
+          sellerId: line.sellerId && isUuid(line.sellerId) ? line.sellerId : null,
+          productName: line.productName,
+          sku: null,
+          variantName: line.variantLabel,
+          unitPrice: line.unitPrice,
+          quantity: line.quantity,
+          lineTotal: line.lineTotal,
+          currencyCode: input.currencyCode,
+          metadata: {
+            slug: line.slug,
+            brand: line.brand,
+            imageUrl: line.imageUrl,
+            unitPriceBase: line.unitPriceBase,
+          } satisfies Prisma.InputJsonValue,
+        })),
+      });
 
-  return {
-    ...created,
-    grandTotal: toNumber(created.grandTotal),
-    discountTotal: toNumber(created.discountTotal),
+      await tx.payment.create({
+        data: {
+          orderId: order.id,
+          paymentMethod: paymentMethodEnum,
+          paymentStatus: initialPaymentStatus,
+          transactionReference:
+            paymentMethodEnum === PaymentMethod.CARD ? null : `TXN-${order.orderNumber}`,
+          gateway:
+            paymentMethodEnum === PaymentMethod.CARD
+              ? "CARD_GATEWAY_PENDING"
+              : "MANUAL_BANK_TRANSFER",
+          amount: amounts.grandTotal,
+          currencyCode: input.currencyCode,
+        },
+      });
+
+      if (paymentMethodEnum === PaymentMethod.CARD) {
+        responseCardPayment = await createCardPaymentSessionForOrderTx(tx, order.id);
+      }
+
+      if (appliedCoupon) {
+        await tx.couponUsage.create({
+          data: {
+            couponId: appliedCoupon.id,
+            userId: session?.sub ?? null,
+            orderId: order.id,
+            discountAmount: appliedCoupon.discountAmountBase,
+          },
+        });
+      }
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId: order.id,
+          oldStatus: null,
+          newStatus: OrderStatus.PENDING,
+          changedBy: session?.sub ?? null,
+          note: "Order placed from checkout flow",
+        },
+      });
+
+      return order;
+    }, { maxWait: 10_000, timeout: 60_000 });
+  } catch (error) {
+    if (clientRequestId && canUseClientRequestId && isKnownPrismaError(error, "P2002")) {
+      const recoveredOrder = await findExistingOrderByClientRequestId({
+        clientRequestId,
+        inputCustomerEmail: input.customerEmail,
+        session,
+        options,
+      });
+      if (recoveredOrder) {
+        return recoveredOrder;
+      }
+    }
+    throw error;
+  }
+
+  if (stockAlertProductIds.length > 0) {
+    void emitLowStockAdminAlerts(db, {
+      productIds: stockAlertProductIds,
+      source: "ORDER_PLACED",
+    }).catch(() => undefined);
+  }
+
+  return toCheckoutCreateOrderResponse({
+    created,
+    options,
     coupon: responseCoupon,
-    bankTransfer:
-      created.paymentMethod === PaymentMethod.BANK_TRANSFER
-        ? options.bankTransfer
-        : null,
-    cardPayment:
-      created.paymentMethod === PaymentMethod.CARD
-        ? responseCardPayment
-        : null,
-  };
+    cardPayment: responseCardPayment,
+  });
 }
 
 export async function getOrderSummary(orderId: string) {
@@ -1394,6 +1626,7 @@ export async function addBankTransferProof(input: AddPaymentProofInput) {
     await tx.order.update({
       where: { id: order.id },
       data: { paymentStatus: PaymentStatus.AWAITING_VERIFICATION },
+      select: { id: true },
     });
 
     await tx.payment.updateMany({

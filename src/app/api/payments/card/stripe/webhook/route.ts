@@ -1,8 +1,14 @@
-import { fail, ok } from "@/lib/api-response";
+import { attachRequestId, fail, ok } from "@/lib/api-response";
 import { OrderStatus, PaymentStatus } from "@prisma/client";
 import { AppError } from "@/lib/errors";
+import { sendObservabilityAlert } from "@/lib/observability/alerting";
+import { logApiFailure, resolveRequestId } from "@/lib/observability/request-context";
 import { processStripeWebhook } from "@/lib/services/card-payment-service";
-import { createPaymentWebhookEventLog } from "@/lib/services/payment-webhook-service";
+import {
+  createPaymentWebhookEventLog,
+  findSuccessfulPaymentWebhookEventByEventId,
+} from "@/lib/services/payment-webhook-service";
+import { enforceRateLimit } from "@/lib/security/request-security";
 
 type StripeWebhookLogContext = {
   eventId: string | null;
@@ -10,6 +16,8 @@ type StripeWebhookLogContext = {
   reference: string | null;
   payload: Record<string, unknown>;
 };
+
+const maxStripeWebhookBodyBytes = 1_000_000;
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -102,9 +110,54 @@ async function safeLogWebhookEvent(input: {
 }
 
 export async function POST(request: Request) {
+  const requestId = resolveRequestId(request);
+  const rateLimitError = enforceRateLimit(request, {
+    scope: "payments:stripe-webhook",
+    limit: 240,
+    windowMs: 60 * 1000,
+  });
+  if (rateLimitError) return attachRequestId(rateLimitError, requestId);
+
   const rawBody = await request.text();
   const signatureHeader = request.headers.get("stripe-signature");
   const context = buildStripeWebhookLogContext(rawBody);
+
+  if (rawBody.length > maxStripeWebhookBodyBytes) {
+    await safeLogWebhookEvent({
+      eventId: context.eventId,
+      eventType: context.eventType,
+      reference: context.reference,
+      handled: false,
+      success: false,
+      errorCode: "STRIPE_WEBHOOK_PAYLOAD_TOO_LARGE",
+      errorMessage: "Stripe webhook payload exceeded maximum allowed size.",
+      payload: {
+        ...context.payload,
+        payloadSize: rawBody.length,
+      },
+    });
+
+    return fail(
+      "Stripe webhook payload is too large.",
+      { status: 413, requestId },
+      "STRIPE_WEBHOOK_PAYLOAD_TOO_LARGE",
+    );
+  }
+
+  if (context.eventId) {
+    const processedEvent = await findSuccessfulPaymentWebhookEventByEventId("STRIPE", context.eventId);
+    if (processedEvent) {
+      return ok({
+        handled: processedEvent.handled,
+        duplicate: true,
+        eventId: processedEvent.eventId,
+        eventType: processedEvent.eventType,
+        reference: processedEvent.reference,
+        paymentStatus: processedEvent.paymentStatus,
+        orderStatus: processedEvent.orderStatus,
+      }, { requestId });
+    }
+  }
 
   try {
     const result = await processStripeWebhook(rawBody, signatureHeader);
@@ -120,7 +173,7 @@ export async function POST(request: Request) {
       payload: context.payload,
     });
 
-    return ok(result);
+    return ok(result, { requestId });
   } catch (error) {
     const errorCode = error instanceof AppError ? error.code : "STRIPE_WEBHOOK_FAILED";
     const errorMessage =
@@ -138,8 +191,38 @@ export async function POST(request: Request) {
     });
 
     if (error instanceof AppError) {
-      return fail(error.message, error.status, error.code);
+      return fail(error.message, { status: error.status, requestId }, error.code);
     }
-    return fail("Unable to process Stripe webhook", 400, "STRIPE_WEBHOOK_FAILED");
+
+    logApiFailure({
+      scope: "payments.stripe-webhook",
+      requestId,
+      error,
+      metadata: {
+        eventId: context.eventId,
+        eventType: context.eventType,
+        reference: context.reference,
+      },
+    });
+    void sendObservabilityAlert({
+      scope: "api.payments.stripe-webhook",
+      severity: "warning",
+      title: "Stripe webhook processing failure",
+      message: "Stripe webhook route returned an unexpected runtime error.",
+      requestId,
+      fingerprint: context.eventType ?? "stripe-webhook-unknown-event",
+      metadata: {
+        route: "/api/payments/card/stripe/webhook",
+        eventId: context.eventId,
+        eventType: context.eventType,
+        reference: context.reference,
+      },
+    });
+
+    return fail(
+      "Unable to process Stripe webhook",
+      { status: 400, requestId },
+      "STRIPE_WEBHOOK_FAILED",
+    );
   }
 }

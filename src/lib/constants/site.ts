@@ -1,8 +1,11 @@
+const configuredAppUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+const normalizedAppUrl = configuredAppUrl?.replace(/\/+$/, "");
+
 export const siteConfig = {
   name: "Deal Bazaar",
   description:
     "Deal Bazaar is a modern multi-vendor marketplace for trusted deals, fast delivery, and a premium shopping experience.",
-  url: "https://dealbazaar.com",
+  url: normalizedAppUrl || "https://dealbazaar.com",
   supportEmail: "dealbazaar.pvt@gmail.com",
   supportPhone: "+94722493533",
   socialLinks: {

@@ -21,6 +21,32 @@ function toNumber(value: unknown, fallback = 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   }
+  if (typeof value === "bigint") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  if (value && typeof value === "object") {
+    const decimalLike = value as {
+      toNumber?: () => number;
+      toString?: () => string;
+      valueOf?: () => unknown;
+    };
+
+    if (typeof decimalLike.toNumber === "function") {
+      const parsed = decimalLike.toNumber();
+      if (Number.isFinite(parsed)) return parsed;
+    }
+
+    if (typeof decimalLike.toString === "function") {
+      const parsed = Number(decimalLike.toString());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+
+    if (typeof decimalLike.valueOf === "function") {
+      const parsed = Number(decimalLike.valueOf());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
   return fallback;
 }
 

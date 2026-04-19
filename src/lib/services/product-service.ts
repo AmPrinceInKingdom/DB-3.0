@@ -1,5 +1,4 @@
 import { Prisma, ReviewStatus } from "@prisma/client";
-import { allHomeProducts } from "@/lib/constants/mock-data";
 import { db } from "@/lib/db";
 import type {
   Product,
@@ -168,7 +167,7 @@ type ProductDetailsRecord = Prisma.ProductGetPayload<{
   select: typeof productDetailsQuery;
 }>;
 
-const fallbackImage = allHomeProducts[0]?.imageUrl ?? "/next.svg";
+const fallbackImage = "/next.svg";
 
 function toNumber(value: Prisma.Decimal | number | string | null | undefined) {
   if (value === null || value === undefined) return 0;
@@ -295,23 +294,6 @@ function buildReviewItems(record: ProductDetailsRecord): ProductReview[] {
   }));
 }
 
-function buildFallbackDetails(product: Product): ProductDetailsContent {
-  return {
-    description:
-      `${product.shortDescription}\n\nThis item is curated by Deal Bazaar with quality checks for performance, reliability, and shipping safety.`,
-    galleryImages: [product.imageUrl],
-    specifications: [
-      { label: "Brand", value: product.brand },
-      { label: "Category", value: product.category },
-      { label: "Stock", value: product.inStock ? "In stock" : "Out of stock" },
-      { label: "SKU", value: `DB-${product.id.toUpperCase()}` },
-    ],
-    reviews: [],
-    storeName: `${product.brand} Official Store`,
-    variants: [],
-  };
-}
-
 function buildVariantItems(record: ProductDetailsRecord): ProductDetailsVariant[] {
   return record.variants.map((variant) => ({
     id: variant.id,
@@ -324,47 +306,6 @@ function buildVariantItems(record: ProductDetailsRecord): ProductDetailsVariant[
     imageUrl: variant.imageUrl?.trim() || null,
     isDefault: variant.isDefault,
   }));
-}
-
-function sortProducts(products: Product[], sortBy: ProductListQuery["sortBy"] = "popular") {
-  return [...products].sort((a, b) => {
-    if (sortBy === "price_asc") return a.price - b.price;
-    if (sortBy === "price_desc") return b.price - a.price;
-    if (sortBy === "newest") return Number(Boolean(b.isNewArrival)) - Number(Boolean(a.isNewArrival));
-    if (sortBy === "best_selling") return b.reviewsCount - a.reviewsCount || b.rating - a.rating;
-    if (sortBy === "highest_rated") return b.rating - a.rating || b.reviewsCount - a.reviewsCount;
-    return b.rating * b.reviewsCount - a.rating * a.reviewsCount;
-  });
-}
-
-function filterMockProducts(query: ProductListQuery) {
-  const search = query.search?.trim().toLowerCase();
-
-  const filtered = allHomeProducts.filter((product) => {
-    if (search) {
-      const searchable = [product.name, product.shortDescription, product.category, product.brand]
-        .join(" ")
-        .toLowerCase();
-      if (!searchable.includes(search)) return false;
-    }
-
-    if (query.minPrice !== undefined && product.price < query.minPrice) return false;
-    if (query.maxPrice !== undefined && product.price > query.maxPrice) return false;
-    if (query.categoryName && product.category.toLowerCase() !== query.categoryName.trim().toLowerCase()) {
-      return false;
-    }
-    if (query.brandName && product.brand.toLowerCase() !== query.brandName.trim().toLowerCase()) {
-      return false;
-    }
-    if (query.featured && !product.isFeatured) return false;
-    if (query.newArrival && !product.isNewArrival) return false;
-    if (query.bestSeller && !product.isBestSeller) return false;
-    if (query.inStock && !product.inStock) return false;
-
-    return true;
-  });
-
-  return sortProducts(filtered, query.sortBy).slice(0, 48);
 }
 
 export async function listProducts(query: ProductListQuery) {
@@ -438,7 +379,7 @@ export async function listProducts(query: ProductListQuery) {
 
     return rows.map(mapRecordToProduct);
   } catch {
-    return filterMockProducts(query);
+    return [];
   }
 }
 
@@ -446,17 +387,6 @@ type ShopFilterOptions = {
   categories: string[];
   brands: string[];
 };
-
-function getMockShopFilterOptions(): ShopFilterOptions {
-  return {
-    categories: Array.from(new Set(allHomeProducts.map((product) => product.category))).sort((a, b) =>
-      a.localeCompare(b),
-    ),
-    brands: Array.from(new Set(allHomeProducts.map((product) => product.brand))).sort((a, b) =>
-      a.localeCompare(b),
-    ),
-  };
-}
 
 export async function getShopFilterOptions(): Promise<ShopFilterOptions> {
   try {
@@ -495,16 +425,15 @@ export async function getShopFilterOptions(): Promise<ShopFilterOptions> {
       }),
     ]);
 
-    if (categories.length === 0 && brands.length === 0) {
-      return getMockShopFilterOptions();
-    }
-
     return {
       categories: categories.map((item) => item.name),
       brands: brands.map((item) => item.name),
     };
   } catch {
-    return getMockShopFilterOptions();
+    return {
+      categories: [],
+      brands: [],
+    };
   }
 }
 
@@ -521,10 +450,10 @@ export async function getProductBySlug(slug: string): Promise<Product | null> {
       return mapRecordToProduct(row);
     }
   } catch {
-    // Fallback to mock data if database is unavailable.
+    return null;
   }
 
-  return allHomeProducts.find((item) => item.slug === normalizedSlug) ?? null;
+  return null;
 }
 
 export async function getRelatedProducts(slug: string, categoryName: string, limit = 12) {
@@ -533,7 +462,7 @@ export async function getRelatedProducts(slug: string, categoryName: string, lim
 
   try {
     if (normalizedCategory) {
-      const rows = await db.product.findMany({
+      const byCategory = await db.product.findMany({
         where: {
           status: "ACTIVE",
           slug: { not: normalizedSlug },
@@ -549,15 +478,25 @@ export async function getRelatedProducts(slug: string, categoryName: string, lim
         take: limit,
       });
 
-      if (rows.length > 0) {
-        return rows.map(mapRecordToProduct);
+      if (byCategory.length > 0) {
+        return byCategory.map(mapRecordToProduct);
       }
     }
-  } catch {
-    // Fallback to mock data if database is unavailable.
-  }
 
-  return allHomeProducts.filter((item) => item.slug !== normalizedSlug).slice(0, limit);
+    const rows = await db.product.findMany({
+      where: {
+        status: "ACTIVE",
+        slug: { not: normalizedSlug },
+      },
+      orderBy: [{ popularityScore: "desc" }, { createdAt: "desc" }],
+      select: productCardQuery,
+      take: limit,
+    });
+
+    return rows.map(mapRecordToProduct);
+  } catch {
+    return [];
+  }
 }
 
 export async function getProductDetailsContentBySlug(slug: string): Promise<ProductDetailsContent | null> {
@@ -588,9 +527,8 @@ export async function getProductDetailsContentBySlug(slug: string): Promise<Prod
       };
     }
   } catch {
-    // Fallback to mock data if database is unavailable.
+    return null;
   }
 
-  const fallbackProduct = allHomeProducts.find((item) => item.slug === normalizedSlug);
-  return fallbackProduct ? buildFallbackDetails(fallbackProduct) : null;
+  return null;
 }

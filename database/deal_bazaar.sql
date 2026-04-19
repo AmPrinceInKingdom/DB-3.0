@@ -1,4 +1,4 @@
-
+﻿
 BEGIN;
 SET TIME ZONE 'UTC';
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -87,7 +87,9 @@ CREATE TABLE IF NOT EXISTS shipping_methods (id UUID PRIMARY KEY DEFAULT gen_ran
 
 CREATE TABLE IF NOT EXISTS coupons (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),code CITEXT NOT NULL UNIQUE,title VARCHAR(160) NOT NULL,description TEXT,discount_type discount_type NOT NULL,discount_scope discount_scope NOT NULL DEFAULT 'ORDER',discount_value NUMERIC(14,2) NOT NULL CHECK(discount_value>=0),min_purchase_amount NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(min_purchase_amount>=0),max_discount_amount NUMERIC(14,2) CHECK(max_discount_amount IS NULL OR max_discount_amount>=0),starts_at TIMESTAMPTZ,expires_at TIMESTAMPTZ,usage_limit INT,usage_limit_per_user INT NOT NULL DEFAULT 1 CHECK(usage_limit_per_user>0),used_count INT NOT NULL DEFAULT 0 CHECK(used_count>=0),is_active BOOLEAN NOT NULL DEFAULT TRUE,applicable_category_id UUID REFERENCES categories(id) ON DELETE SET NULL,applicable_product_id UUID REFERENCES products(id) ON DELETE SET NULL,created_by UUID REFERENCES users(id) ON DELETE SET NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),CONSTRAINT coupons_date_check CHECK(expires_at IS NULL OR starts_at IS NULL OR expires_at>starts_at),CONSTRAINT coupons_scope_check CHECK((discount_scope='ORDER' AND applicable_category_id IS NULL AND applicable_product_id IS NULL) OR (discount_scope='CATEGORY' AND applicable_category_id IS NOT NULL AND applicable_product_id IS NULL) OR (discount_scope='PRODUCT' AND applicable_product_id IS NOT NULL AND applicable_category_id IS NULL)));
 
-CREATE TABLE IF NOT EXISTS orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),order_number VARCHAR(40) NOT NULL UNIQUE DEFAULT generate_order_number(),user_id UUID REFERENCES users(id) ON DELETE SET NULL,billing_address_id UUID REFERENCES addresses(id) ON DELETE SET NULL,shipping_address_id UUID REFERENCES addresses(id) ON DELETE SET NULL,shipping_method_id UUID REFERENCES shipping_methods(id) ON DELETE SET NULL,status order_status NOT NULL DEFAULT 'PENDING',payment_status payment_status NOT NULL DEFAULT 'PENDING',payment_method payment_method NOT NULL,currency_code CHAR(3) NOT NULL REFERENCES supported_currencies(code),exchange_rate_to_base NUMERIC(18,8) NOT NULL DEFAULT 1 CHECK(exchange_rate_to_base>0),subtotal NUMERIC(14,2) NOT NULL CHECK(subtotal>=0),discount_total NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(discount_total>=0),shipping_fee NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(shipping_fee>=0),tax_total NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(tax_total>=0),grand_total NUMERIC(14,2) NOT NULL CHECK(grand_total>=0),coupon_id UUID REFERENCES coupons(id) ON DELETE SET NULL,customer_email CITEXT NOT NULL,customer_phone VARCHAR(32),tracking_number VARCHAR(120),notes TEXT,admin_notes TEXT,placed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),delivered_at TIMESTAMPTZ,cancelled_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),CONSTRAINT orders_phone_format CHECK(customer_phone IS NULL OR customer_phone ~ '^[+0-9 ()-]{7,32}$'));
+CREATE TABLE IF NOT EXISTS orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),order_number VARCHAR(40) NOT NULL UNIQUE DEFAULT generate_order_number(),client_request_id VARCHAR(120),user_id UUID REFERENCES users(id) ON DELETE SET NULL,billing_address_id UUID REFERENCES addresses(id) ON DELETE SET NULL,shipping_address_id UUID REFERENCES addresses(id) ON DELETE SET NULL,shipping_method_id UUID REFERENCES shipping_methods(id) ON DELETE SET NULL,status order_status NOT NULL DEFAULT 'PENDING',payment_status payment_status NOT NULL DEFAULT 'PENDING',payment_method payment_method NOT NULL,currency_code CHAR(3) NOT NULL REFERENCES supported_currencies(code),exchange_rate_to_base NUMERIC(18,8) NOT NULL DEFAULT 1 CHECK(exchange_rate_to_base>0),subtotal NUMERIC(14,2) NOT NULL CHECK(subtotal>=0),discount_total NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(discount_total>=0),shipping_fee NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(shipping_fee>=0),tax_total NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(tax_total>=0),grand_total NUMERIC(14,2) NOT NULL CHECK(grand_total>=0),coupon_id UUID REFERENCES coupons(id) ON DELETE SET NULL,customer_email CITEXT NOT NULL,customer_phone VARCHAR(32),tracking_number VARCHAR(120),notes TEXT,admin_notes TEXT,placed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),delivered_at TIMESTAMPTZ,cancelled_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),CONSTRAINT orders_phone_format CHECK(customer_phone IS NULL OR customer_phone ~ '^[+0-9 ()-]{7,32}$'));
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_request_id VARCHAR(120);
+CREATE UNIQUE INDEX IF NOT EXISTS orders_client_request_id_unique ON orders(client_request_id) WHERE client_request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS orders_user_idx ON orders(user_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS orders_status_idx ON orders(status,payment_status);
 CREATE INDEX IF NOT EXISTS orders_order_number_idx ON orders(order_number);
@@ -155,7 +157,11 @@ DROP TRIGGER IF EXISTS trg_homepage_sections_updated_at ON homepage_sections; CR
 DROP TRIGGER IF EXISTS trg_site_settings_updated_at ON site_settings; CREATE TRIGGER trg_site_settings_updated_at BEFORE UPDATE ON site_settings FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_shipments_updated_at ON shipments; CREATE TRIGGER trg_shipments_updated_at BEFORE UPDATE ON shipments FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 INSERT INTO supported_currencies(code,name,symbol,decimals,is_active,is_base) VALUES
-('LKR','Sri Lankan Rupee','Rs',0,TRUE,TRUE),('USD','US Dollar','$',2,TRUE,FALSE),('EUR','Euro','�',2,TRUE,FALSE),('GBP','British Pound','�',2,TRUE,FALSE),('INR','Indian Rupee','?',2,TRUE,FALSE)
+('LKR','Sri Lankan Rupee','Rs',0,TRUE,TRUE),
+('USD','US Dollar','$',2,TRUE,FALSE),
+('EUR','Euro','EUR',2,TRUE,FALSE),
+('GBP','British Pound','GBP',2,TRUE,FALSE),
+('INR','Indian Rupee','INR',2,TRUE,FALSE)
 ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,symbol=EXCLUDED.symbol,decimals=EXCLUDED.decimals,is_active=EXCLUDED.is_active,is_base=EXCLUDED.is_base,updated_at=NOW();
 
 INSERT INTO currency_rates(base_currency_code,target_currency_code,rate,source) VALUES
@@ -200,4 +206,35 @@ INSERT INTO site_settings(setting_group,setting_key,setting_value,is_public,desc
 ('localization','default_currency','"LKR"'::jsonb,TRUE,'Default display currency')
 ON CONFLICT(setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value,is_public=EXCLUDED.is_public,description=EXCLUDED.description,updated_at=NOW();
 
+-- Schema verification snapshot (expected base tables: 51)
+DO $$
+DECLARE
+  expected_count INT := 51;
+  actual_count INT;
+BEGIN
+  SELECT COUNT(*) INTO actual_count
+  FROM information_schema.tables
+  WHERE table_schema = 'public'
+    AND table_type = 'BASE TABLE'
+    AND table_name IN (
+      'supported_currencies','users','user_profiles','admins','sellers',
+      'seller_payout_accounts','seller_payouts','user_sessions','email_verification_tokens',
+      'password_reset_tokens','otp_codes','categories','subcategories','brands',
+      'product_tags','products','product_images','product_videos','product_attributes',
+      'product_attribute_values','product_variants','product_variant_attribute_values',
+      'product_tag_map','carts','cart_items','saved_cart_items','wishlists',
+      'wishlist_items','compare_lists','compare_items','addresses','shipping_methods',
+      'coupons','orders','order_items','order_status_history','payments',
+      'payment_webhook_events','payment_proofs','coupon_usages','reviews',
+      'review_images','notifications','banners','homepage_sections','inventory_logs',
+      'currency_rates','site_settings','audit_logs','newsletter_subscribers','shipments'
+    );
+
+  IF actual_count <> expected_count THEN
+    RAISE WARNING 'Deal Bazaar schema check: expected % tables, found %.', expected_count, actual_count;
+  ELSE
+    RAISE NOTICE 'Deal Bazaar schema check: %/% tables present.', actual_count, expected_count;
+  END IF;
+END $$;
 COMMIT;
+

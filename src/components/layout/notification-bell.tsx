@@ -27,6 +27,14 @@ type Props = {
 };
 
 const POLLING_INTERVAL_MS = 30_000;
+const STREAM_RECONNECT_DELAY_MS = 4_000;
+
+function resolveStreamEnabled() {
+  const rawFlag = process.env.NEXT_PUBLIC_ENABLE_NOTIFICATION_STREAM?.trim().toLowerCase();
+  if (rawFlag === "1" || rawFlag === "true") return true;
+  if (rawFlag === "0" || rawFlag === "false") return false;
+  return process.env.NODE_ENV !== "production";
+}
 
 function formatBadgeCount(value: number) {
   if (value > 99) return "99+";
@@ -75,6 +83,7 @@ export function NotificationBell({
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [toggleBusy, setToggleBusy] = useState(false);
   const [liveUnreadCount, setLiveUnreadCount] = useState<number | null>(null);
+  const shouldUseRealtimeStream = Boolean(realtimeStreamEndpoint) && resolveStreamEnabled();
 
   const unreadCount = liveUnreadCount ?? payload?.summary.unreadCount ?? 0;
   const previewItems = useMemo(() => payload?.items ?? [], [payload?.items]);
@@ -117,7 +126,7 @@ export function NotificationBell({
   }, [loadNotifications]);
 
   useEffect(() => {
-    if (realtimeStreamEndpoint) {
+    if (shouldUseRealtimeStream) {
       return;
     }
 
@@ -129,10 +138,10 @@ export function NotificationBell({
     return () => {
       window.clearInterval(interval);
     };
-  }, [loadNotifications, realtimeStreamEndpoint]);
+  }, [loadNotifications, shouldUseRealtimeStream]);
 
   useEffect(() => {
-    if (!realtimeStreamEndpoint) return;
+    if (!shouldUseRealtimeStream || !realtimeStreamEndpoint) return;
 
     let isDisposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -170,7 +179,7 @@ export function NotificationBell({
         }
         reconnectTimer = setTimeout(() => {
           connect();
-        }, 4000);
+        }, STREAM_RECONNECT_DELAY_MS);
       };
     };
 
@@ -184,7 +193,7 @@ export function NotificationBell({
       }
       eventSource?.close();
     };
-  }, [notificationsEndpoint, realtimeStreamEndpoint]);
+  }, [notificationsEndpoint, realtimeStreamEndpoint, shouldUseRealtimeStream]);
 
   useEffect(() => {
     if (!isOpen) return;

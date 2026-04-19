@@ -14,6 +14,7 @@ type ApiEnvelope<T> = {
   success: boolean;
   data?: T;
   error?: string;
+  code?: string;
 };
 
 type SellerAction = "APPROVE" | "SUSPEND" | "REJECT";
@@ -88,12 +89,19 @@ export function SellersManager() {
       });
       const payload = (await response.json()) as ApiEnvelope<AdminSellerListItem>;
       if (!response.ok || !payload.success || !payload.data) {
+        if (payload.code === "ADMIN_SESSION_INVALID") {
+          window.location.href = "/login?next=/admin/sellers";
+        }
         throw new Error(payload.error ?? "Unable to update seller application");
       }
 
       setItems((current) =>
         current.map((item) => (item.userId === sellerUserId ? payload.data! : item)),
       );
+      setReasons((current) => ({
+        ...current,
+        [sellerUserId]: "",
+      }));
       pushToast("Seller application updated", "success");
     } catch (updateError) {
       const message =

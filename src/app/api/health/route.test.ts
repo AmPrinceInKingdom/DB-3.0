@@ -14,6 +14,7 @@ const originalEnv = { ...process.env };
 
 function setCoreEnv(overrides: Partial<NodeJS.ProcessEnv> = {}) {
   process.env.DATABASE_URL = "postgresql://runtime-db";
+  process.env.DIRECT_URL = "postgresql://direct-db";
   process.env.JWT_SECRET = "abcdefghijklmnopqrstuvwxyz123456";
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://demo.supabase.co";
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-key";
@@ -32,6 +33,8 @@ function setCoreEnv(overrides: Partial<NodeJS.ProcessEnv> = {}) {
 }
 
 describe("GET /api/health", () => {
+  const healthRequest = () => new Request("http://localhost/api/health");
+
   beforeEach(() => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
@@ -45,25 +48,23 @@ describe("GET /api/health", () => {
   it("returns ok when core dependencies are healthy", async () => {
     mockedDb.$queryRaw.mockResolvedValue([{ "?column?": 1 }] as never);
 
-    const response = await GET();
+    const response = await GET(healthRequest());
     const payload = (await response.json()) as {
       status: string;
       success: boolean;
-      checks: {
-        env: { status: string };
-        database: { status: string };
-        supabase: { status: string };
-        smtp: { status: string };
-      };
+      timestamp: string;
+      environment: string;
+      responseTimeMs: number;
+      checks?: unknown;
     };
 
     expect(response.status).toBe(200);
     expect(payload.success).toBe(true);
     expect(payload.status).toBe("ok");
-    expect(payload.checks.env.status).toBe("ok");
-    expect(payload.checks.database.status).toBe("ok");
-    expect(payload.checks.supabase.status).toBe("ok");
-    expect(payload.checks.smtp.status).toBe("ok");
+    expect(typeof payload.timestamp).toBe("string");
+    expect(typeof payload.environment).toBe("string");
+    expect(typeof payload.responseTimeMs).toBe("number");
+    expect(payload.checks).toBeUndefined();
   });
 
   it("returns degraded when optional integrations are missing", async () => {
@@ -73,39 +74,68 @@ describe("GET /api/health", () => {
       SMTP_USER: undefined,
     });
 
-    const response = await GET();
+    const response = await GET(healthRequest());
     const payload = (await response.json()) as {
       status: string;
       success: boolean;
-      checks: {
-        smtp: { status: string; configured: boolean; missingKeys: string[] };
-      };
+      checks?: unknown;
     };
 
     expect(response.status).toBe(200);
     expect(payload.success).toBe(true);
     expect(payload.status).toBe("degraded");
-    expect(payload.checks.smtp.status).toBe("degraded");
-    expect(payload.checks.smtp.configured).toBe(false);
-    expect(payload.checks.smtp.missingKeys).toContain("SMTP_USER");
+    expect(payload.checks).toBeUndefined();
   });
 
   it("returns down when database ping fails", async () => {
     mockedDb.$queryRaw.mockRejectedValue(new Error("db offline"));
 
-    const response = await GET();
+    const response = await GET(healthRequest());
     const payload = (await response.json()) as {
       status: string;
       success: boolean;
-      checks: {
-        database: { status: string; detail: string };
-      };
     };
 
     expect(response.status).toBe(503);
     expect(payload.success).toBe(false);
     expect(payload.status).toBe("down");
-    expect(payload.checks.database.status).toBe("down");
-    expect(payload.checks.database.detail).toContain("failed");
+  });
+
+  it("treats DIRECT_URL as valid database configuration when DATABASE_URL is missing", async () => {
+    mockedDb.$queryRaw.mockResolvedValue([{ "?column?": 1 }] as never);
+    setCoreEnv({
+      DATABASE_URL: undefined,
+      DIRECT_URL: "postgresql://direct-db-only",
+    });
+
+    const response = await GET(healthRequest());
+    const payload = (await response.json()) as {
+      status: string;
+      success: boolean;
+      checks?: unknown;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.success).toBe(true);
+    expect(payload.status).toBe("ok");
+    expect(payload.checks).toBeUndefined();
+  });
+
+  it("includes x-request-id in response headers and payload", async () => {
+    mockedDb.$queryRaw.mockResolvedValue([{ "?column?": 1 }] as never);
+
+    const response = await GET(
+      new Request("http://localhost/api/health", {
+        headers: {
+          "x-request-id": "health-test-123456",
+        },
+      }),
+    );
+    const payload = (await response.json()) as {
+      requestId?: string;
+    };
+
+    expect(response.headers.get("x-request-id")).toBe("health-test-123456");
+    expect(payload.requestId).toBe("health-test-123456");
   });
 });

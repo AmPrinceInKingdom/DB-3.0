@@ -18,8 +18,6 @@ type RequestFormValues = z.infer<typeof emailVerificationRequestSchema>;
 
 type VerificationRequestPayload = {
   message: string;
-  debugVerificationUrl?: string;
-  debugOtpCode?: string;
 };
 
 type ApiResponse<T> = {
@@ -193,17 +191,6 @@ export function EmailVerificationForm({ initialEmail = "", initialToken = "" }: 
       {requestResult ? (
         <div className="space-y-2 rounded-xl border border-primary/30 bg-primary/5 p-3 text-xs">
           <p className="font-medium text-primary">{requestResult.message}</p>
-          {requestResult.debugVerificationUrl ? (
-            <p className="break-all text-primary">
-              Dev link:{" "}
-              <Link href={requestResult.debugVerificationUrl} className="underline">
-                {requestResult.debugVerificationUrl}
-              </Link>
-            </p>
-          ) : null}
-          {requestResult.debugOtpCode ? (
-            <p className="text-primary">Dev OTP: {requestResult.debugOtpCode}</p>
-          ) : null}
         </div>
       ) : null}
 

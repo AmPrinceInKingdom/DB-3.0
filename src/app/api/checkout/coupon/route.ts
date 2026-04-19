@@ -19,7 +19,16 @@ export async function POST(request: Request) {
     });
     if (rateLimitError) return rateLimitError;
 
-    const payload = previewCouponSchema.parse(await request.json());
+    const parsedPayload = previewCouponSchema.safeParse(await request.json());
+    if (!parsedPayload.success) {
+      return fail(
+        "Invalid coupon preview payload. Please refresh checkout and try again.",
+        400,
+        "COUPON_PREVIEW_PAYLOAD_INVALID",
+      );
+    }
+
+    const payload = parsedPayload.data;
     const preview = await previewCheckoutCoupon(payload, session);
     return ok(preview);
   } catch (error) {

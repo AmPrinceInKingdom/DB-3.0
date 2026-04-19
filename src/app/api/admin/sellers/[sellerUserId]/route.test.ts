@@ -10,6 +10,14 @@ vi.mock("@/lib/services/seller-service", () => ({
   reviewAdminSellerApplication: vi.fn(),
 }));
 
+vi.mock("@/lib/services/audit-log-service", () => ({
+  createAuditLog: vi.fn(),
+  getAuditMetaFromRequest: vi.fn(() => ({
+    ipAddress: "127.0.0.1",
+    userAgent: "vitest",
+  })),
+}));
+
 import { PATCH } from "@/app/api/admin/sellers/[sellerUserId]/route";
 import { requireAdminSession } from "@/lib/auth/admin-guard";
 import { reviewAdminSellerApplication } from "@/lib/services/seller-service";

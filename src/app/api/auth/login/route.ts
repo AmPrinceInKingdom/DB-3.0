@@ -1,104 +1,103 @@
-import { NextResponse } from "next/server";
-import { fail } from "@/lib/api-response";
+import { attachRequestId, fail, ok } from "@/lib/api-response";
 import { AppError } from "@/lib/errors";
 import { loginUser } from "@/lib/auth/auth-service";
+import { classifyAuthRuntimeFailure } from "@/lib/auth/runtime-failure";
+import { sendObservabilityAlert } from "@/lib/observability/alerting";
 import { setSessionCookie } from "@/lib/auth/session";
-import { enforceRateLimit, enforceSameOriginMutation } from "@/lib/security/request-security";
+import { logApiFailure, resolveRequestId } from "@/lib/observability/request-context";
+import {
+  clearFailedVerificationAttempts,
+  enforceFailureLock,
+  enforceRateLimit,
+  enforceSameOriginMutation,
+  getRequestIp,
+  recordFailedVerificationAttempt,
+} from "@/lib/security/request-security";
 import { loginSchema } from "@/lib/validators/auth";
 
-function classifyLoginFailure(error: unknown) {
-  if (!(error instanceof Error)) {
-    return null;
-  }
-
-  const message = error.message.toLowerCase();
-
-  if (
-    message.includes("jwt_secret") ||
-    message.includes("environment variable not found: database_url") ||
-    message.includes("environment variable not found: direct_url")
-  ) {
-    return fail(
-      "Sign-in service is temporarily unavailable. Please try again shortly.",
-      503,
-      "AUTH_CONFIG_ERROR",
-    );
-  }
-
-  if (
-    message.includes("the table") ||
-    message.includes("does not exist") ||
-    message.includes("p2021")
-  ) {
-    return fail(
-      "Database schema is not ready yet. Please try again after setup.",
-      503,
-      "AUTH_SCHEMA_MISSING",
-    );
-  }
-
-  if (
-    message.includes("tenant or user not found") ||
-    message.includes("authentication failed against database server")
-  ) {
-    return fail(
-      "Database credentials are invalid for this deployment.",
-      503,
-      "AUTH_DB_CREDENTIALS_INVALID",
-    );
-  }
-
-  if (
-    message.includes("database_url") ||
-    message.includes("can't reach database server") ||
-    message.includes("prisma")
-  ) {
-    return fail(
-      "Sign-in service is temporarily unavailable. Please try again shortly.",
-      503,
-      "AUTH_DB_UNAVAILABLE",
-    );
-  }
-
-  return null;
-}
+const loginFailureScope = "auth:login-failure";
+const loginFailureWindowMs = 10 * 60 * 1000;
+const loginFailureLockMs = 10 * 60 * 1000;
+const loginFailureMaxAttempts = 8;
 
 export async function POST(request: Request) {
+  const requestId = resolveRequestId(request);
   const originError = enforceSameOriginMutation(request);
-  if (originError) return originError;
+  if (originError) return attachRequestId(originError, requestId);
 
   const rateLimitError = enforceRateLimit(request, {
     scope: "auth:login",
     limit: 12,
     windowMs: 10 * 60 * 1000,
   });
-  if (rateLimitError) return rateLimitError;
+  if (rateLimitError) return attachRequestId(rateLimitError, requestId);
+
+  let failureIdentity = "";
 
   try {
     const payload = loginSchema.parse(await request.json());
-    const result = await loginUser(payload);
-
-    const response = NextResponse.json({
-      success: true,
-      data: result.user,
+    failureIdentity = `${payload.email}:${getRequestIp(request)}`;
+    const failureLockError = enforceFailureLock({
+      scope: loginFailureScope,
+      identity: failureIdentity,
+      maxFailures: loginFailureMaxAttempts,
+      windowMs: loginFailureWindowMs,
+      lockMs: loginFailureLockMs,
+      lockedCode: "LOGIN_LOCKED",
+      lockedMessage: "Too many invalid sign-in attempts. Please try again in a few minutes.",
     });
+    if (failureLockError) return attachRequestId(failureLockError, requestId);
+
+    const result = await loginUser(payload);
+    clearFailedVerificationAttempts(loginFailureScope, failureIdentity);
+
+    const response = ok(result.user, { requestId });
 
     await setSessionCookie(response, result.token);
     return response;
   } catch (error) {
     if (error instanceof AppError) {
-      return fail(error.message, error.status, error.code);
+      if (error.code === "UNAUTHORIZED" && failureIdentity) {
+        const failureState = recordFailedVerificationAttempt({
+          scope: loginFailureScope,
+          identity: failureIdentity,
+          maxFailures: loginFailureMaxAttempts,
+          windowMs: loginFailureWindowMs,
+          lockMs: loginFailureLockMs,
+        });
+
+        if (failureState.locked) {
+          return fail(
+            "Too many invalid sign-in attempts. Please try again in a few minutes.",
+            { status: 429, requestId },
+            "LOGIN_LOCKED",
+          );
+        }
+      }
+      return fail(error.message, { status: error.status, requestId }, error.code);
     }
 
-    if (process.env.NODE_ENV !== "test") {
-      console.error("[auth.login] unexpected failure", error);
-    }
+    logApiFailure({ scope: "auth.login", requestId, error });
+    void sendObservabilityAlert({
+      scope: "api.auth.login",
+      severity: "warning",
+      title: "Unexpected login route failure",
+      message: "Login route threw an unclassified runtime error.",
+      requestId,
+      metadata: {
+        route: "/api/auth/login",
+      },
+    });
 
-    const classifiedFailure = classifyLoginFailure(error);
+    const classifiedFailure = classifyAuthRuntimeFailure(error, "login");
     if (classifiedFailure) {
-      return classifiedFailure;
+      return fail(
+        classifiedFailure.message,
+        { status: classifiedFailure.status, requestId },
+        classifiedFailure.code,
+      );
     }
 
-    return fail("Unable to sign in", 500, "LOGIN_FAILED");
+    return fail("Unable to sign in", { status: 500, requestId }, "LOGIN_FAILED");
   }
 }

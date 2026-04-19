@@ -4,6 +4,7 @@ import { AppError } from "@/lib/errors";
 import { fail, ok } from "@/lib/api-response";
 import { requireAdminSession } from "@/lib/auth/admin-guard";
 import { reviewAdminSellerApplication } from "@/lib/services/seller-service";
+import { createAuditLog, getAuditMetaFromRequest } from "@/lib/services/audit-log-service";
 import { adminSellerReviewSchema } from "@/lib/validators/seller";
 
 type RouteContext = {
@@ -25,6 +26,26 @@ export async function PATCH(request: Request, context: RouteContext) {
       reason: payload.reason,
     });
 
+    try {
+      const auditMeta = getAuditMetaFromRequest(request);
+      await createAuditLog({
+        actorUserId: auth.session.sub,
+        action: "SELLER_APPLICATION_REVIEWED",
+        targetTable: "sellers",
+        targetId: sellerUserId,
+        ipAddress: auditMeta.ipAddress,
+        userAgent: auditMeta.userAgent,
+        newValues: {
+          action: payload.action,
+          reason: payload.reason ?? null,
+          sellerStatus: updated.status,
+          userRole: updated.user.role,
+        },
+      });
+    } catch {
+      // Keep seller review successful even when audit logging fails.
+    }
+
     return ok(updated);
   } catch (error) {
     if (error instanceof AppError) {
@@ -41,6 +62,13 @@ export async function PATCH(request: Request, context: RouteContext) {
           "Database is busy right now. Please retry seller action in a few seconds.",
           503,
           "ADMIN_SELLER_DB_BUSY",
+        );
+      }
+      if (error.code === "P2003") {
+        return fail(
+          "Admin session is invalid. Please sign in again.",
+          401,
+          "ADMIN_SESSION_INVALID",
         );
       }
       return fail("Unable to update seller application", 500, "ADMIN_SELLER_UPDATE_FAILED");

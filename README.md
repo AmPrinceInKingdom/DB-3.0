@@ -44,6 +44,7 @@ Copy-Item .env.example .env
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `DATABASE_URL` (Supabase pooler, `6543`)
 - `DIRECT_URL` (Supabase direct, `5432`)
+- `PRISMA_USE_DIRECT_URL` (optional: `1` for local/E2E runtime, keep `0` on Vercel production)
 - `SUPABASE_STORAGE_BUCKET_PRODUCTS`
 - `SUPABASE_STORAGE_BUCKET_PAYMENTS`
 - `SUPABASE_STORAGE_BUCKET_BRANDING`
@@ -80,7 +81,11 @@ Example:
 ```env
 DATABASE_URL=postgresql://postgres.<PROJECT_REF>:<PASSWORD>@aws-0-<REGION>.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1
 DIRECT_URL=postgresql://postgres:<PASSWORD>@db.<PROJECT_REF>.supabase.co:5432/postgres
+# Optional local/E2E switch:
+PRISMA_USE_DIRECT_URL=0
 ```
+
+Use `PRISMA_USE_DIRECT_URL=1` only for local production-mode checks (for example seeded E2E with `next start`) when pooler connectivity is unstable. Keep it `0` on Vercel production so runtime uses the pooler URL.
 
 4. Apply schema SQL:
 
@@ -136,6 +141,30 @@ Important:
 npm run seed:super-admin -- --email superadmin@dealbazaar.lk --password DealBazaar@2026#Admin --firstName Deal --lastName Owner
 ```
 
+## Deterministic E2E Seed
+
+Create fixed test data (admin + customer + product slugs used by Playwright smoke):
+
+```bash
+npm run seed:e2e
+```
+
+This seeds:
+
+- `e2e-admin@dealbazaar.test` (role: `SUPER_ADMIN`)
+- `e2e-customer@dealbazaar.test` (role: `CUSTOMER`)
+- `16tb-usb-3-2-flash-drive`
+- `bluetooth-smart-glasses`
+
+You can override defaults with env vars:
+
+```env
+E2E_ADMIN_EMAIL=your-admin@example.com
+E2E_ADMIN_PASSWORD=StrongPassword123#
+E2E_CUSTOMER_EMAIL=your-customer@example.com
+E2E_CUSTOMER_PASSWORD=StrongPassword123#
+```
+
 ## Useful Scripts
 
 - `npm run dev` - start development server
@@ -148,12 +177,19 @@ npm run seed:super-admin -- --email superadmin@dealbazaar.lk --password DealBaza
 - `npm run test:e2e` - run Playwright smoke tests
 - `npm run test:e2e:headed` - run Playwright with browser UI
 - `npm run test:e2e:install` - install Playwright Chromium browser
+- `npm run test:e2e:seeded` - seed deterministic E2E data, set seeded admin creds, then run Playwright
 - `npm run prisma:generate` - generate Prisma client
 - `npm run prisma:migrate` - Prisma migration (dev)
 - `npm run db:push` - push Prisma schema
 - `npm run db:studio` - open Prisma Studio
 - `npm run verify:deploy` - pre-deploy env + DB readiness check
+- `npm run verify:stripe-live -- --production` - strict Stripe account/API go-live validation
+- `npm run verify:runtime -- --base-url https://your-domain` - post-deploy smoke check for auth and health endpoints
+- `npm run verify:launch-qa -- --base-url https://your-domain --product-slug your-product-slug` - launch readiness QA (SEO + public pages + runtime APIs)
+- `npm run verify:cutover -- --base-url https://your-domain --product-slug your-product-slug --include-auth true --confirm-db-backup true --confirm-rollback-plan true --confirm-oncall true` - full launch cutover sign-off gate
+- `npm run verify:release-config -- --mode all` - validate GitHub Actions secrets/variables readiness
 - `npm run seed:super-admin` - create/update super admin
+- `npm run seed:e2e` - create deterministic E2E admin/customer/products
 
 ## Testing
 
@@ -176,6 +212,11 @@ Vercel production:
 ```bash
 curl https://<your-domain>/api/health
 ```
+
+Health endpoint behavior:
+
+- `/api/health` returns **public-safe summary** (status/timestamp/response time).
+- `/api/admin/health` returns **full diagnostic checks** (env/db/supabase/smtp) and requires admin session.
 
 Run in watch mode:
 
@@ -203,12 +244,53 @@ Run smoke tests:
 npm run test:e2e
 ```
 
+Run with deterministic seeded data:
+
+```bash
+npm run test:e2e:seeded
+```
+
+`test:e2e:seeded` automatically uses:
+
+- `E2E_ADMIN_EMAIL=e2e-admin@dealbazaar.test`
+- `E2E_ADMIN_PASSWORD=DealBazaar@2026#E2E`
+
 Optional env vars for authenticated admin smoke:
 
 ```env
 E2E_ADMIN_EMAIL=superadmin@dealbazaar.lk
 E2E_ADMIN_PASSWORD=<YOUR_SUPER_ADMIN_PASSWORD>
 ```
+
+## API Request Tracing (Observability)
+
+Core API routes now return a request correlation id in both places:
+
+- Response header: `x-request-id`
+- JSON body field: `requestId`
+
+If your client sends `x-request-id` (or `x-correlation-id`), Deal Bazaar will reuse it when valid; otherwise the server generates one.
+
+This helps debug production issues on Vercel quickly by matching:
+
+1. Browser/API error response
+2. Server log entry for that exact request
+
+## Runtime Alert Webhook (Optional)
+
+You can enable external critical alerts (Slack/Discord/Teams webhook) with:
+
+```env
+OBSERVABILITY_ALERT_WEBHOOK_URL=https://your-webhook-url
+OBSERVABILITY_ALERT_COOLDOWN_SECONDS=300
+```
+
+When configured, Deal Bazaar sends alerts for:
+
+- Health endpoint `down` state
+- Unexpected failures in key APIs (auth, order creation, Stripe webhook)
+
+Alert cooldown prevents repeated spam for the same failure fingerprint.
 
 ## Troubleshooting
 
@@ -234,6 +316,7 @@ Required for app runtime:
 Recommended:
 
 - `DIRECT_URL` (for Prisma migrate/seed scripts)
+- `PRISMA_USE_DIRECT_URL` (`0` recommended on Vercel production)
 - `SUPABASE_STORAGE_BUCKET_PRODUCTS`
 - `SUPABASE_STORAGE_BUCKET_PAYMENTS`
 - `SUPABASE_STORAGE_BUCKET_BRANDING`
@@ -261,13 +344,251 @@ Optional (skip DB ping):
 npm run verify:deploy -- --skip-db
 ```
 
+Stripe production-only validation (recommended before enabling Stripe Checkout in live mode):
+
+```bash
+npm run verify:stripe-live -- --production
+```
+
 This check validates:
 
 - Critical environment variables
 - `JWT_SECRET` minimum length
 - `NEXT_PUBLIC_APP_URL` format
+- Payment gateway readiness (`CARD_PAYMENT_PROVIDER`, Stripe env, production HTTPS/live-key checks)
 - SMTP completeness
 - Live database connectivity
+
+## Post-Deploy Runtime Smoke Check
+
+Run this after Vercel deployment to validate core runtime behavior:
+
+```bash
+npm run verify:runtime -- --base-url https://<your-domain>
+```
+
+Optional readiness wait (recommended right after fresh deploy):
+
+```bash
+npm run verify:runtime -- --base-url https://<your-domain> --wait-for-ready 300 --retry-interval 15
+```
+
+Checks included:
+
+- public health endpoint summary (`/api/health`)
+- login/register page availability
+- checkout options availability (`/api/checkout/options`)
+- unauthenticated guard on `/api/auth/me`
+- admin guard on `/api/admin/health`
+- invalid-credential login rejection
+- auth runtime availability classification (`AUTH_CONFIG_ERROR`, `AUTH_SCHEMA_MISSING`, `AUTH_DB_CREDENTIALS_INVALID`, `AUTH_DB_UNAVAILABLE`) with request id output
+- card session validation (`/api/payments/card/session`)
+- card retry payload validation (`/api/payments/card/retry`)
+- Stripe webhook signature guard (`/api/payments/card/stripe/webhook`)
+
+Optional authenticated flow (login -> me -> logout):
+
+```bash
+SMOKE_LOGIN_EMAIL=superadmin@dealbazaar.lk SMOKE_LOGIN_PASSWORD=<PASSWORD> npm run verify:runtime -- --base-url https://<your-domain>
+```
+
+PowerShell:
+
+```powershell
+$env:SMOKE_LOGIN_EMAIL="superadmin@dealbazaar.lk"
+$env:SMOKE_LOGIN_PASSWORD="<PASSWORD>"
+npm run verify:runtime -- --base-url https://<your-domain>
+```
+
+## Launch QA Verifier
+
+Run this before final go-live sign-off:
+
+```bash
+npm run verify:launch-qa -- --base-url https://<your-domain> --product-slug 16tb-usb-3-2-flash-drive
+```
+
+What it checks:
+
+- Core public pages load (`/`, `/shop`, legal pages, auth pages, product details)
+- Homepage metadata sanity (`title`, `description`, `og:title`, canonical, viewport, `lang`)
+- Product details CTA and metadata sanity
+- `robots.txt` and `sitemap.xml` availability/content
+- Runtime API checks (`/api/health`, `/api/checkout/options`)
+- Slow-response warnings for launch performance triage
+
+## Automated Runtime Smoke (GitHub Actions)
+
+Workflow file:
+
+- `.github/workflows/runtime-smoke.yml`
+
+How to run:
+
+1. Go to **Actions -> Runtime Smoke Check -> Run workflow**
+2. Set `base_url` to your deployed site URL
+3. Optional: enable `include_auth` to run login/session/logout check
+
+Automatic trigger:
+
+- Runs automatically on every push to `main` when repository variable `SMOKE_BASE_URL` is configured.
+- Authenticated checks on auto-push can be toggled with repository variable `SMOKE_INCLUDE_AUTH=true`.
+- Deployment readiness wait defaults to `300s` with `15s` retry interval on CI (override via vars below).
+
+Required repository configuration:
+
+- Optional variable: `SMOKE_BASE_URL` (default URL when input is empty)
+- Optional variables:
+  - `SMOKE_INCLUDE_AUTH` (`true` / `false`)
+  - `SMOKE_WAIT_FOR_READY_SECONDS` (for example `300`)
+  - `SMOKE_RETRY_INTERVAL_SECONDS` (for example `15`)
+- Optional secrets for authenticated check:
+  - `SMOKE_LOGIN_EMAIL`
+  - `SMOKE_LOGIN_PASSWORD`
+- Optional failure alert secret:
+  - `RUNTIME_SMOKE_ALERT_WEBHOOK_URL` (Slack/Discord/Teams compatible incoming webhook)
+
+You can also trigger this workflow with `repository_dispatch` event type `runtime-smoke` and payload:
+
+```json
+{
+  "event_type": "runtime-smoke",
+  "client_payload": {
+    "base_url": "https://your-domain",
+    "include_auth": true
+  }
+}
+```
+
+## Quality Checks CI (GitHub Actions)
+
+Workflow file:
+
+- `.github/workflows/quality-checks.yml`
+
+What it enforces on every PR/push:
+
+- Prisma client generation
+- `npm run verify:deploy -- --skip-db` for static deployment contract validation
+- lint + typecheck
+- production build
+- unit tests
+- Playwright smoke tests
+
+This keeps core storefront/admin/auth regressions from merging.
+
+## Release Readiness Gate (GitHub Actions)
+
+Workflow file:
+
+- `.github/workflows/release-readiness.yml`
+
+How to run:
+
+1. Go to **Actions -> Release Readiness Gate -> Run workflow**
+2. Set `base_url` to your production deployment URL (or configure repository variable `RELEASE_BASE_URL`)
+3. Optional:
+   - `include_auth=true` to run authenticated runtime smoke
+   - `run_seeded_e2e=true` to run deterministic seeded browser tests
+
+What it validates in one run:
+
+- `npm run verify:release-config -- --mode release` (workflow env/secret preflight)
+- `npm run verify:deploy` (full production env + DB + payment gateway checks)
+- `npm run verify:stripe-live -- --production` when `CARD_PAYMENT_PROVIDER=STRIPE_CHECKOUT`
+- production build
+- unit tests
+- optional seeded E2E suite
+- runtime smoke checks against deployed URL (public + optional authenticated)
+- `npm run verify:launch-qa` (SEO/public-page/runtime launch sanity)
+
+Required GitHub secrets:
+
+- `DATABASE_URL`
+- `JWT_SECRET`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Recommended secrets (for full coverage):
+
+- `SMOKE_LOGIN_EMAIL`
+- `SMOKE_LOGIN_PASSWORD`
+- `E2E_ADMIN_EMAIL`
+- `E2E_ADMIN_PASSWORD`
+- `E2E_CUSTOMER_EMAIL`
+- `E2E_CUSTOMER_PASSWORD`
+- `STRIPE_SECRET_KEY` (if `CARD_PAYMENT_PROVIDER=STRIPE_CHECKOUT`)
+- `STRIPE_WEBHOOK_SECRET` (if `CARD_PAYMENT_PROVIDER=STRIPE_CHECKOUT`)
+
+Recommended repository variables:
+
+- `RELEASE_BASE_URL` (default deployed production URL)
+- `CARD_PAYMENT_PROVIDER` (`SANDBOX` or `STRIPE_CHECKOUT`)
+- `LAUNCH_QA_PRODUCT_SLUG` (optional product slug used by launch QA)
+
+## Launch QA Pack Workflow (GitHub Actions)
+
+Workflow file:
+
+- `.github/workflows/launch-qa.yml`
+
+How to run:
+
+1. Go to **Actions -> Launch QA Pack -> Run workflow**
+2. Set `base_url` (or configure repository variable `LAUNCH_QA_BASE_URL`)
+3. Optional: set `product_slug` and toggle `run_runtime_smoke`
+
+Recommended repository variable:
+
+- `LAUNCH_QA_BASE_URL` (default production/staging URL for QA checks)
+
+This workflow runs `npm run verify:release-config -- --mode launch` before QA checks.
+
+## Cutover Sign-off (Final Go-Live Gate)
+
+Run locally:
+
+```bash
+npm run verify:cutover -- --base-url https://<your-domain> --product-slug 16tb-usb-3-2-flash-drive --include-auth true --confirm-db-backup true --confirm-rollback-plan true --confirm-oncall true
+```
+
+This executes:
+
+1. `verify:deploy`
+2. `verify:stripe-live -- --production` (when Stripe provider is active)
+3. `verify:runtime`
+4. `verify:launch-qa`
+5. manual confirmations (backup, rollback, on-call)
+
+GitHub workflow:
+
+- `.github/workflows/cutover-signoff.yml`
+
+This workflow runs `npm run verify:release-config -- --mode cutover` before cutover execution.
+
+How to run:
+
+1. Go to **Actions -> Cutover Sign-off -> Run workflow**
+2. Set `base_url` (or configure `RELEASE_BASE_URL`)
+3. Mark all confirmation toggles to `true` only after launch ops team verifies them
+
+Runbook:
+
+- `docs/LAUNCH_CUTOVER_RUNBOOK.md`
+- `docs/GITHUB_ACTIONS_SETUP.md`
+
+## Release Config Check Workflow (GitHub Actions)
+
+Workflow file:
+
+- `.github/workflows/release-config-check.yml`
+
+How to run:
+
+1. Go to **Actions -> Release Config Check -> Run workflow**
+2. Set `mode=all`
+3. Optional: set `strict=true` to treat warnings as errors
 
 ## Notes
 

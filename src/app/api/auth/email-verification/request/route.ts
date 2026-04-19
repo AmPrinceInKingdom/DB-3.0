@@ -20,26 +20,31 @@ export async function POST(request: Request) {
   const originError = enforceSameOriginMutation(request);
   if (originError) return originError;
 
-  const rateLimitError = enforceRateLimit(request, {
-    scope: "auth:email-verification-request",
+  const ipRateLimitError = enforceRateLimit(request, {
+    scope: "auth:email-verification-request-ip",
     limit: 10,
     windowMs: 15 * 60 * 1000,
   });
-  if (rateLimitError) return rateLimitError;
+  if (ipRateLimitError) return ipRateLimitError;
 
   try {
-    const payload = emailVerificationRequestSchema.parse(await request.json());
+    const parsedPayload = emailVerificationRequestSchema.safeParse(await request.json());
+    if (!parsedPayload.success) {
+      return fail("Please enter a valid email address.", 400, "INVALID_INPUT");
+    }
+
+    const payload = parsedPayload.data;
     const emailRateLimitError = enforceRateLimit(request, {
       scope: "auth:email-verification-request-email",
       keyPart: payload.email,
       limit: 4,
-      windowMs: 10 * 60 * 1000,
+      windowMs: 30 * 60 * 1000,
     });
     if (emailRateLimitError) return emailRateLimitError;
 
     const result = await requestEmailVerification(payload, {
       appUrl: resolveAppUrlFromRequest(request),
-      includeDebugArtifacts: process.env.NODE_ENV !== "production",
+      includeDebugArtifacts: false,
     });
 
     return ok(result);

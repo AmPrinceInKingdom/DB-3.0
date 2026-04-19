@@ -14,6 +14,11 @@ type EmitStockAlertsInput = {
   source: StockAlertSource;
 };
 
+type StockAlertDbClient = Pick<
+  Prisma.TransactionClient,
+  "siteSetting" | "user" | "product" | "notification"
+>;
+
 function toTitle(status: StockStatus) {
   if (status === StockStatus.OUT_OF_STOCK) return "Out of stock alert";
   return "Low stock alert";
@@ -27,7 +32,7 @@ function toMessage(productName: string, status: StockStatus, stockQuantity: numb
 }
 
 export async function emitLowStockAdminAlerts(
-  tx: Prisma.TransactionClient,
+  tx: StockAlertDbClient,
   input: EmitStockAlertsInput,
 ) {
   const productIds = Array.from(new Set(input.productIds.filter((id) => id.trim().length > 0)));

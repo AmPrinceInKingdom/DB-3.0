@@ -11,19 +11,34 @@ vi.mock("@/lib/auth/session", () => ({
 }));
 
 vi.mock("@/lib/security/request-security", () => ({
+  clearFailedVerificationAttempts: vi.fn(),
+  enforceFailureLock: vi.fn(),
   enforceRateLimit: vi.fn(),
   enforceSameOriginMutation: vi.fn(),
+  getRequestIp: vi.fn(),
+  recordFailedVerificationAttempt: vi.fn(),
 }));
 
 import { POST } from "@/app/api/auth/login/route";
 import { loginUser } from "@/lib/auth/auth-service";
 import { setSessionCookie } from "@/lib/auth/session";
-import { enforceRateLimit, enforceSameOriginMutation } from "@/lib/security/request-security";
+import {
+  clearFailedVerificationAttempts,
+  enforceFailureLock,
+  enforceRateLimit,
+  enforceSameOriginMutation,
+  getRequestIp,
+  recordFailedVerificationAttempt,
+} from "@/lib/security/request-security";
 
 const mockedLoginUser = vi.mocked(loginUser);
 const mockedSetSessionCookie = vi.mocked(setSessionCookie);
+const mockedClearFailedVerificationAttempts = vi.mocked(clearFailedVerificationAttempts);
+const mockedEnforceFailureLock = vi.mocked(enforceFailureLock);
 const mockedEnforceRateLimit = vi.mocked(enforceRateLimit);
 const mockedEnforceSameOriginMutation = vi.mocked(enforceSameOriginMutation);
+const mockedGetRequestIp = vi.mocked(getRequestIp);
+const mockedRecordFailedVerificationAttempt = vi.mocked(recordFailedVerificationAttempt);
 
 function makeRequest(body: unknown) {
   return new Request("http://localhost/api/auth/login", {
@@ -38,6 +53,8 @@ describe("POST /api/auth/login", () => {
     vi.clearAllMocks();
     mockedEnforceSameOriginMutation.mockReturnValue(null);
     mockedEnforceRateLimit.mockReturnValue(null);
+    mockedEnforceFailureLock.mockReturnValue(null);
+    mockedGetRequestIp.mockReturnValue("127.0.0.1");
   });
 
   it("blocks request when same-origin check fails", async () => {
@@ -66,6 +83,25 @@ describe("POST /api/auth/login", () => {
     );
 
     expect(response.status).toBe(429);
+    expect(mockedLoginUser).not.toHaveBeenCalled();
+  });
+
+  it("blocks request when login failure lock is active", async () => {
+    mockedEnforceFailureLock.mockReturnValue(
+      fail("Too many invalid sign-in attempts", 429, "LOGIN_LOCKED"),
+    );
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as { success: boolean; code?: string };
+
+    expect(response.status).toBe(429);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("LOGIN_LOCKED");
     expect(mockedLoginUser).not.toHaveBeenCalled();
   });
 
@@ -99,6 +135,10 @@ describe("POST /api/auth/login", () => {
     });
     expect(mockedSetSessionCookie).toHaveBeenCalledTimes(1);
     expect(mockedSetSessionCookie).toHaveBeenCalledWith(expect.any(Response), "session-token");
+    expect(mockedClearFailedVerificationAttempts).toHaveBeenCalledWith(
+      "auth:login-failure",
+      "user@example.com:127.0.0.1",
+    );
   });
 
   it("returns app error when auth service throws AppError", async () => {
@@ -122,6 +162,62 @@ describe("POST /api/auth/login", () => {
     expect(payload.success).toBe(false);
     expect(payload.error).toBe("Invalid credentials");
     expect(payload.code).toBe("INVALID_CREDENTIALS");
+    expect(mockedRecordFailedVerificationAttempt).not.toHaveBeenCalled();
+  });
+
+  it("records failed attempt when auth service returns unauthorized", async () => {
+    mockedLoginUser.mockRejectedValue(new AppError("Invalid email or password", 401, "UNAUTHORIZED"));
+    mockedRecordFailedVerificationAttempt.mockReturnValue({
+      locked: false,
+      remainingAttempts: 7,
+    });
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as {
+      success: boolean;
+      code?: string;
+    };
+
+    expect(response.status).toBe(401);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("UNAUTHORIZED");
+    expect(mockedRecordFailedVerificationAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "auth:login-failure",
+        identity: "user@example.com:127.0.0.1",
+      }),
+    );
+  });
+
+  it("returns login locked when unauthorized attempts hit lock threshold", async () => {
+    mockedLoginUser.mockRejectedValue(new AppError("Invalid email or password", 401, "UNAUTHORIZED"));
+    mockedRecordFailedVerificationAttempt.mockReturnValue({
+      locked: true,
+      retryAfterSeconds: 600,
+      remainingAttempts: 0,
+    });
+
+    const response = await POST(
+      makeRequest({
+        email: "user@example.com",
+        password: "StrongPass123",
+      }),
+    );
+    const payload = (await response.json()) as {
+      success: boolean;
+      code?: string;
+      error?: string;
+    };
+
+    expect(response.status).toBe(429);
+    expect(payload.success).toBe(false);
+    expect(payload.code).toBe("LOGIN_LOCKED");
+    expect(payload.error).toBe("Too many invalid sign-in attempts. Please try again in a few minutes.");
   });
 
   it("returns stable fallback error for unknown failures", async () => {

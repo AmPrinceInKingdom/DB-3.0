@@ -26,6 +26,8 @@ type FailureLockOptions = {
   maxFailures: number;
   windowMs: number;
   lockMs: number;
+  lockedCode?: string;
+  lockedMessage?: string;
 };
 type FailureAttemptResult = {
   locked: boolean;
@@ -177,10 +179,13 @@ export function enforceFailureLock(options: FailureLockOptions) {
 
   if (existing.lockedUntil > now) {
     const retryAfterSeconds = Math.max(1, Math.ceil((existing.lockedUntil - now) / 1000));
+    const lockedMessage =
+      options.lockedMessage ??
+      `Too many invalid attempts. Try again in ${retryAfterSeconds} seconds.`;
     return fail(
-      `Too many invalid attempts. Try again in ${retryAfterSeconds} seconds.`,
+      lockedMessage,
       429,
-      "OTP_LOCKED",
+      options.lockedCode ?? "OTP_LOCKED",
     );
   }
 

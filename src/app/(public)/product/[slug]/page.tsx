@@ -22,6 +22,16 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return {
     title: product.name,
     description: product.shortDescription,
+    alternates: {
+      canonical: `/product/${product.slug}`,
+    },
+    openGraph: {
+      title: product.name,
+      description: product.shortDescription,
+      url: `/product/${product.slug}`,
+      type: "website",
+      images: product.imageUrl ? [{ url: product.imageUrl }] : undefined,
+    },
   };
 }
 

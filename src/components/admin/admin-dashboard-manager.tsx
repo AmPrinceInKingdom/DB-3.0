@@ -10,9 +10,13 @@ import {
   CheckCircle2,
   Clock3,
   CreditCard,
+  Database,
+  Globe,
   LayoutDashboard,
+  Mail,
   RefreshCcw,
   Settings,
+  ShieldCheck,
   ShoppingCart,
   Users,
 } from "lucide-react";
@@ -28,6 +32,28 @@ type ApiEnvelope<T> = {
   error?: string;
 };
 
+type HealthCheck = {
+  status: "ok" | "degraded" | "down";
+  detail: string;
+  configured?: boolean;
+  latencyMs?: number;
+  missingKeys?: string[];
+};
+
+type HealthPayload = {
+  success: boolean;
+  status: "ok" | "degraded" | "down";
+  timestamp: string;
+  environment: string;
+  responseTimeMs: number;
+  checks: {
+    env: HealthCheck;
+    database: HealthCheck;
+    supabase: HealthCheck;
+    smtp: HealthCheck;
+  };
+};
+
 const rangeOptions = [30, 90, 180];
 
 function formatPercent(value: number | null) {
@@ -40,11 +66,30 @@ function formatShortDate(value: string) {
   return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function getStatusLabel(status: "ok" | "degraded" | "down") {
+  if (status === "ok") return "Healthy";
+  if (status === "degraded") return "Needs Attention";
+  return "Down";
+}
+
+function getStatusClassName(status: "ok" | "degraded" | "down") {
+  if (status === "ok") {
+    return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300";
+  }
+  if (status === "degraded") {
+    return "bg-amber-500/15 text-amber-700 dark:text-amber-300";
+  }
+  return "bg-red-500/15 text-red-700 dark:text-red-300";
+}
+
 export function AdminDashboardManager() {
   const [rangeDays, setRangeDays] = useState(30);
   const [data, setData] = useState<AdminAnalyticsPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [health, setHealth] = useState<HealthPayload | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const [healthError, setHealthError] = useState<string | null>(null);
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
@@ -65,9 +110,34 @@ export function AdminDashboardManager() {
     }
   }, [rangeDays]);
 
+  const loadHealth = useCallback(async () => {
+    setHealthLoading(true);
+    setHealthError(null);
+    try {
+      const response = await fetch("/api/admin/health", {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as Partial<HealthPayload>;
+
+      if (!payload || !payload.checks || !payload.status) {
+        throw new Error("Invalid health payload");
+      }
+
+      setHealth(payload as HealthPayload);
+    } catch (loadError) {
+      setHealthError(loadError instanceof Error ? loadError.message : "Unable to load deployment health");
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadDashboard();
   }, [loadDashboard]);
+
+  useEffect(() => {
+    void loadHealth();
+  }, [loadHealth]);
 
   const trendChartData = useMemo(
     () =>
@@ -113,6 +183,40 @@ export function AdminDashboardManager() {
     ];
   }, [data]);
 
+  const healthCards = useMemo(() => {
+    if (!health) return [];
+    return [
+      {
+        key: "env",
+        title: "Environment",
+        icon: ShieldCheck,
+        check: health.checks.env,
+      },
+      {
+        key: "database",
+        title: "Database",
+        icon: Database,
+        check: health.checks.database,
+      },
+      {
+        key: "supabase",
+        title: "Supabase",
+        icon: Globe,
+        check: health.checks.supabase,
+      },
+      {
+        key: "smtp",
+        title: "SMTP / Email",
+        icon: Mail,
+        check: health.checks.smtp,
+      },
+    ];
+  }, [health]);
+
+  const handleRefreshAll = () => {
+    void Promise.all([loadDashboard(), loadHealth()]);
+  };
+
   return (
     <div className="space-y-6">
       <section className="space-y-4 rounded-2xl border border-border bg-card p-5">
@@ -135,7 +239,7 @@ export function AdminDashboardManager() {
                 </option>
               ))}
             </Select>
-            <Button variant="outline" onClick={() => void loadDashboard()} disabled={loading}>
+            <Button variant="outline" onClick={handleRefreshAll} disabled={loading || healthLoading}>
               <RefreshCcw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
@@ -155,7 +259,87 @@ export function AdminDashboardManager() {
           <Button asChild size="sm" variant="outline">
             <Link href="/admin/settings">Platform Settings</Link>
           </Button>
+          <Button asChild size="sm" variant="outline">
+            <Link href="/admin/auth-diagnostics">Auth Diagnostics</Link>
+          </Button>
         </div>
+      </section>
+
+      <section className="space-y-4 rounded-2xl border border-border bg-card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Deployment Health</h2>
+            <p className="text-sm text-muted-foreground">
+              Live production readiness checks for auth, database, and integrations.
+            </p>
+          </div>
+          {health ? (
+            <span
+              className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${getStatusClassName(
+                health.status,
+              )}`}
+            >
+              {getStatusLabel(health.status)}
+            </span>
+          ) : null}
+        </div>
+
+        {healthError ? (
+          <p className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-300">
+            {healthError}
+          </p>
+        ) : null}
+
+        {healthLoading ? (
+          <p className="text-sm text-muted-foreground">Loading deployment health...</p>
+        ) : health ? (
+          <>
+            <div className="grid gap-2 rounded-xl border border-border bg-background p-3 text-xs text-muted-foreground sm:grid-cols-3">
+              <p>
+                Environment: <span className="font-semibold text-foreground">{health.environment}</span>
+              </p>
+              <p>
+                Checked at:{" "}
+                <span className="font-semibold text-foreground">
+                  {new Date(health.timestamp).toLocaleString()}
+                </span>
+              </p>
+              <p>
+                API response:{" "}
+                <span className="font-semibold text-foreground">{health.responseTimeMs} ms</span>
+              </p>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {healthCards.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <article key={item.key} className="space-y-2 rounded-xl border border-border bg-background p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">{item.title}</p>
+                      <Icon className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${getStatusClassName(
+                        item.check.status,
+                      )}`}
+                    >
+                      {getStatusLabel(item.check.status)}
+                    </span>
+                    <p className="text-xs text-muted-foreground">{item.check.detail}</p>
+                    {item.check.missingKeys && item.check.missingKeys.length > 0 ? (
+                      <p className="text-xs text-red-600 dark:text-red-300">
+                        Missing: {item.check.missingKeys.join(", ")}
+                      </p>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">Deployment health data not available yet.</p>
+        )}
       </section>
 
       {error ? (

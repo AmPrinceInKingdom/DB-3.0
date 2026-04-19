@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "prisma generate",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -19,7 +20,14 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "verify:deploy": "node scripts/predeploy-check.mjs",
-    "seed:super-admin": "node scripts/seed-super-admin.mjs"
+    "verify:stripe-live": "node scripts/stripe-live-check.mjs",
+    "verify:runtime": "node scripts/runtime-smoke-check.mjs",
+    "verify:launch-qa": "node scripts/launch-qa-check.mjs",
+    "verify:cutover": "node scripts/cutover-signoff.mjs",
+    "verify:release-config": "node scripts/release-config-check.mjs",
+    "seed:super-admin": "node scripts/seed-super-admin.mjs",
+    "seed:e2e": "node scripts/seed-e2e.mjs",
+    "test:e2e:seeded": "node scripts/run-seeded-e2e.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

@@ -51,6 +51,40 @@ function isMissingTableError(error: unknown) {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2021";
 }
 
+export async function findSuccessfulPaymentWebhookEventByEventId(
+  provider: WebhookProvider,
+  eventId: string,
+) {
+  const normalizedEventId = normalizeOptionalText(eventId);
+  if (!normalizedEventId) return null;
+
+  try {
+    return await db.paymentWebhookEvent.findFirst({
+      where: {
+        provider,
+        eventId: normalizedEventId,
+        handled: true,
+        success: true,
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        eventId: true,
+        eventType: true,
+        reference: true,
+        handled: true,
+        success: true,
+        paymentStatus: true,
+        orderStatus: true,
+        createdAt: true,
+      },
+    });
+  } catch (error) {
+    if (isMissingTableError(error)) return null;
+    throw error;
+  }
+}
+
 export async function createPaymentWebhookEventLog(input: CreatePaymentWebhookEventInput) {
   const normalizedReference = normalizeOptionalText(input.reference);
   const normalizedEventType = normalizeOptionalText(input.eventType) ?? "unknown";

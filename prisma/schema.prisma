@@ -783,6 +783,7 @@ model Coupon {
 model Order {
   id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orderNumber        String        @unique @default(dbgenerated("generate_order_number()")) @map("order_number") @db.VarChar(40)
+  clientRequestId    String?       @unique @map("client_request_id") @db.VarChar(120)
   userId             String?       @map("user_id") @db.Uuid
   billingAddressId   String?       @map("billing_address_id") @db.Uuid
   shippingAddressId  String?       @map("shipping_address_id") @db.Uuid

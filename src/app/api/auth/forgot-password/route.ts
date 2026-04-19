@@ -20,15 +20,28 @@ export async function POST(request: Request) {
   const originError = enforceSameOriginMutation(request);
   if (originError) return originError;
 
-  const rateLimitError = enforceRateLimit(request, {
-    scope: "auth:forgot-password",
+  const ipRateLimitError = enforceRateLimit(request, {
+    scope: "auth:forgot-password-ip",
     limit: 8,
     windowMs: 10 * 60 * 1000,
   });
-  if (rateLimitError) return rateLimitError;
+  if (ipRateLimitError) return ipRateLimitError;
 
   try {
-    const payload = forgotPasswordSchema.parse(await request.json());
+    const parsedPayload = forgotPasswordSchema.safeParse(await request.json());
+    if (!parsedPayload.success) {
+      return fail("Please enter a valid email address.", 400, "INVALID_INPUT");
+    }
+
+    const payload = parsedPayload.data;
+    const emailRateLimitError = enforceRateLimit(request, {
+      scope: "auth:forgot-password-email",
+      limit: 4,
+      windowMs: 30 * 60 * 1000,
+      keyPart: payload.email,
+    });
+    if (emailRateLimitError) return emailRateLimitError;
+
     const result = await requestPasswordReset(payload, {
       appUrl: resolveAppUrlFromRequest(request),
       includeDebugToken: process.env.NODE_ENV !== "production",
